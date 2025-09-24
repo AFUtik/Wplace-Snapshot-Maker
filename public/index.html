@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>WPlace Snapshot Viewer</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <link rel="stylesheet" href="style.css" />
+  <style>#map { width:100vw; height:100vh; }</style>
+</head>
+<body>
+  <div id="leaflet-map" style="position:absolute; top:0; left:0; width:100%; height:100%; z-index:0;"></div>
+
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.8.0/dist/leaflet.css"
+  />
+  <script src="https://unpkg.com/leaflet@1.8.0/dist/leaflet.js"></script>
+
+
+  <link
+    href="https://unpkg.com/maplibre-gl@2.2.1/dist/maplibre-gl.css"
+    rel="stylesheet"
+  />
+  <script src="https://unpkg.com/maplibre-gl@2.2.1/dist/maplibre-gl.js"></script>
+
+  <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.20/leaflet-maplibre-gl.js"></script>
+
+
+  <script>
+    const TILE_SIZE    = 1000;
+    const NATIVE_ZOOM  = 16;
+
+    const map = L.map('leaflet-map', {
+      maxBounds: [[180, -Infinity], [-180, Infinity]],
+      maxBoundsViscosity: 1,  
+      minZoom: 1
+    }).setView([0,0], 0);
+
+    L.tileLayer('http://127.0.0.1:3000/tiles/{z}/{x}/{y}.png', {
+      tileSize: TILE_SIZE,
+      maxNativeZoom: 8,
+      maxZoom: 12,
+      noWrap: true
+
+    }).addTo(map);
+
+    var gl = L.maplibreGL({
+      style: 'https://demotiles.maplibre.org/style.json'
+    }).addTo(map);
+  </script>
+</body>
+</html>
