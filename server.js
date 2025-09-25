@@ -23,8 +23,10 @@ const CHUNK_IMAGE_CACHE = new LRUCache({
   max: 200
 });
 
+let snapshotPath = "";
+
 function chunkPath(cx, cy) {
-  return path.resolve(`data/chunks/${cx}_${cy}.png`);
+  return path.resolve(`data/snapshots/${snapshotPath}/${cx}_${cy}.png`);
 }
 
 function tileToPixel(z, x, y) {
@@ -132,7 +134,7 @@ const rl = readline.createInterface({
 rl.prompt();
 
 rl.on('line', (line) => {
-  const args = line.trim().split(/\s+/); // разбиваем по пробелам
+  const args = line.trim().split(/\s+/);
   const command = args[0];
 
   switch (command) {
@@ -154,9 +156,18 @@ rl.on('line', (line) => {
       break;
     case 'update':
       break;
+    case 'show':
+      break;
     case 'schedule':
       break;
     case 'load':
+      TILE_CACHE.clear()
+      CHUNK_IMAGE_CACHE.clear()
+
+      const [ , snapshotName, date] = args;
+      
+      console.log('Snapshot was succefully loaded.')
+
       break;
     case 'delete':
       break;

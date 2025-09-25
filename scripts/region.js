@@ -14,7 +14,9 @@ class TileSet {
 }
 
 export async function fetchRegion(tlx0, tly0, tlx1, tly1, name) {
-  const folderPath = path.resolve(`data/chunks/`);
+  const now = new Date();
+
+  const folderPath = path.resolve(`data/snapshots/${name}/${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()}/${now.getHours()}/${now.getMinutes()}`);
   await fs.mkdir(folderPath, { recursive: true });
 
   for (let y = tly0; y >= tly1; y--) {
@@ -29,6 +31,13 @@ export async function fetchRegion(tlx0, tly0, tlx1, tly1, name) {
       }
     }
   }
+
+  const metadata = {
+    "latest": `${name}/${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()}/${now.getHours()}/${now.getMinutes()}`,
+    "boundaries": [tlx0, tly0, tlx1, tly1]
+  };
+
+  await fs.writeFile(`data/snapshots/${name}/metadata.json`, JSON.stringify(metadata, null, 2), "utf-8");
 
   console.log("All tiles saved successfully!");
 }
