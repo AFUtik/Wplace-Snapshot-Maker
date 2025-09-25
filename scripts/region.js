@@ -1,4 +1,5 @@
-import fs from "fs";
+import fs from 'fs/promises';
+import path from "path";
 import archiver from "archiver";
 import { downloadFile } from "./downloader.js";
 
@@ -13,31 +14,23 @@ class TileSet {
 }
 
 export async function fetchRegion(tlx0, tly0, tlx1, tly1, name) {
-  if (!fs.existsSync(`data/maps/${name}`)) {
-    fs.mkdirSync(`data/maps/${name}`);
-  }
+  const folderPath = path.resolve(`data/chunks/`);
+  await fs.mkdir(folderPath, { recursive: true });
 
-  const now = new Date();
-  const cur_date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}-${String(now.getMinutes()).padStart(2, '0')}-${String(now.getSeconds()).padStart(2, '0')}`;
-
-  const output = fs.createWriteStream(`data/maps/${name}/${cur_date}.zip`);
-  const archive = archiver("zip", { zlib: { level: 5 } });
-
-  archive.on("error", err => { throw err; });
-  archive.pipe(output);
-
-  for (let y = tly0; y <= tly1; y++) {
+  for (let y = tly0; y >= tly1; y--) {
     for (let x = tlx0; x <= tlx1; x++) {
       try {
         const tile_png = await downloadFile(`https://backend.wplace.live/files/s0/tiles/${x}/${y}.png`);
-        archive.append(tile_png, { name: `${x}_${y}.png` });
+        const tilePath = path.join(folderPath, `${x}_${y}.png`);
+        await fs.writeFile(tilePath, tile_png);
+        console.log(`Saved tile: ${tilePath}`);
       } catch (e) {
-        console.error(`Failed to load ${x}_${y} Tile:`, e.message);
+        console.error(`Failed to load tile ${x}_${y}:`, e.message);
       }
     }
   }
 
-  await archive.finalize();
+  console.log("All tiles saved successfully!");
 }
 
 export function deleteRegion(name) {

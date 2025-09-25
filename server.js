@@ -12,9 +12,9 @@ import { fetchRegion } from './scripts/region.js';
 
 const app = express();
 
-const TILE_SIZE = 1000;
+const TILE_SIZE  = 1000;
 const CHUNK_SIZE = 1000;
-const NATIVE_ZOOM = 16;
+const NATIVE_ZOOM = 12;
 
 const TILE_CACHE = new LRUCache({
   max: 500,
@@ -24,7 +24,7 @@ const CHUNK_IMAGE_CACHE = new LRUCache({
 });
 
 function chunkPath(cx, cy) {
-  return path.resolve(`data/chunks/chunk_${cx}_${cy}.png`);
+  return path.resolve(`data/chunks/${cx}_${cy}.png`);
 }
 
 function tileToPixel(z, x, y) {
@@ -150,13 +150,15 @@ rl.on('line', (line) => {
       }
 
       const [ , x0, y0, x1, y1, name ] = args;
-      console.log(`Fetching region ${name} from (${x0},${y0}) to (${x1},${y1})`);
       fetchRegion(Number(x0), Number(y0), Number(x1), Number(y1), name);
-      console.log('Done!');
       break;
     case 'update':
-
-
+      break;
+    case 'schedule':
+      break;
+    case 'load':
+      break;
+    case 'delete':
       break;
     default:
       console.log(`Unknown Command: ${command}`);

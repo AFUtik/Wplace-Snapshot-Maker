@@ -30,23 +30,52 @@
     const TILE_SIZE    = 1000;
     const NATIVE_ZOOM  = 16;
 
+    const TILES_X = 2048;
+    const TILES_Y = 2048;
+
     const map = L.map('leaflet-map', {
       maxBounds: [[180, -Infinity], [-180, Infinity]],
       maxBoundsViscosity: 1,  
       minZoom: 1
-    }).setView([0,0], 0);
+    })
+
+    const savedState = localStorage.getItem('mapState');
+    if (savedState) {
+      const state = JSON.parse(savedState);
+      map.setView([state.lat, state.lng], state.zoom);
+    } else {
+      map.setView([0, 0], 0);
+    }
 
     L.tileLayer('http://127.0.0.1:3000/tiles/{z}/{x}/{y}.png', {
-      tileSize: TILE_SIZE,
-      maxNativeZoom: 8,
-      maxZoom: 12,
+      tileSize: 512,
+      maxNativeZoom: 12,
+      maxZoom: 16,
+      minZoom: 6,
       noWrap: true
-
     }).addTo(map);
+
+    const tileX = 1231;
+    const tileY = 694;
+
+    const point = L.point(tileX, tileY);
+    const latlng = map.unproject(point, map.getZoom());
+
+    L.marker(latlng).addTo(map);
 
     var gl = L.maplibreGL({
-      style: 'https://demotiles.maplibre.org/style.json'
+      style: 'https://demotiles.maplibre.org/style.json',
     }).addTo(map);
+
+    map.on('moveend zoomend', () => {
+      const center = map.getCenter();
+      const zoom = map.getZoom();
+      localStorage.setItem('mapState', JSON.stringify({
+        lat: center.lat,
+        lng: center.lng,
+        zoom: zoom
+      }));
+    });
   </script>
 </body>
 </html>
