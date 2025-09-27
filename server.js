@@ -8,37 +8,91 @@ import { LRUCache } from 'lru-cache';
 
 import readline from 'readline';
 
-const app = express();
+
+async function readJson(filePath, options = {}) {
+  const { createIfAbsent = false, fallback = {} } = options;
+
+  try {
+    const data = await fs.readFile(filePath, "utf8");
+    return JSON.parse(data);
+  } catch (err) {
+    if (err.code === "ENOENT" && createIfAbsent) {
+      await fs.writeFile(filePath, JSON.stringify(fallback, null, 2), "utf8");
+      return fallback;
+    }
+    throw err;
+  }
+}
+
+async function writeJson(filePath, obj) {
+  try {
+    const data = JSON.stringify(obj, null, 2);
+    await fs.writeFile(filePath, data, 'utf8');
+  } catch (err) {
+    console.error('Failed to write JSON:', err);
+  }
+}
+
+
+function pathToDate(p) {
+  const [year, month, day, hour, minute] = p.trim().split(/\/+/);
+  return new Date(month-1, day, year, hour, minute);
+}
+
+function pathToFormatted(p) {
+  const [year, month, day, hour, minute] = p.trim().split(/\/+/);
+  return `${month}-${day}-${year} ${hour}:${minute}`;
+}
+
+function dateToPath(d) {
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}/${String(d.getHours()).padStart(2,'0')}/${String(d.getMinutes()).padStart(2,'0')}`
+}
+
+function dateToFormatted(d) {
+  return `${d.getMonth() + 1}-${d.getDate()}-${d.getFullYear()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+let settings = await readJson('settings.json', {createIfAbsent: true})
+
+const TILE_CACHE = new LRUCache({
+  max: settings.tile_cache,
+});
+const CHUNK_IMAGE_CACHE = new LRUCache({
+  max: settings.chunk_image_cache
+});
+
+const DOWNLOAD_COOLDOWN = settings.download_cooldown;
+const DOWNLOAD_LIMIT    = settings.download_limit;
 
 const TILE_SIZE  = 1000;
 const CHUNK_SIZE = 1000;
 const NATIVE_ZOOM = 12;
 
-const limit = 5;
+const app = express();
 
-const TILE_CACHE = new LRUCache({
-  max: 1000,
-});
-const CHUNK_IMAGE_CACHE = new LRUCache({
-  max: 1000
-});
+let SNAPSHOT_PATH = settings.current_snapshot + '/' + settings.current_date;
+let SNAPSHOT_NAME = settings.current_snapshot;
+let AREA = [];
+
+if(SNAPSHOT_NAME) console.log(`Current snapshot is ${settings.current_snapshot}[${pathToFormatted(settings.current_date)}]`)
 
 function clearCache() {
   TILE_CACHE.clear();
   CHUNK_IMAGE_CACHE.clear();
 }
-
-let SNAPSHOT_PATH = "";
-let SNAPSHOT_NAME = "";
-let AREA = [];
-
 function switchSnapshot(name, date) {
+  clearCache();
+    
   SNAPSHOT_PATH = name + '/' + date;
   SNAPSHOT_NAME = name;
 }
 
 function chunkPath(cx, cy) {
-  return path.resolve(`data/snapshots/${SNAPSHOT_PATH}//${cx}_${cy}.png`);
+  return path.resolve(`data/snapshots/${SNAPSHOT_PATH}/${cx}_${cy}.png`);
 }
 
 function tileToPixel(z, x, y) {
@@ -106,7 +160,8 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
       let img = CHUNK_IMAGE_CACHE.get(chunkKey);
       if (!img) {
         try {
-          img = await loadImage(p);
+          const buffer = await fs.readFile(p);
+          img = await loadImage(buffer);
           CHUNK_IMAGE_CACHE.set(chunkKey, img);
         } catch (e) {
           continue;
@@ -155,7 +210,7 @@ app.post('/points', async (req, res) => {
   res.json({ status: "ok", received: req.body });
 }) 
 
-app.listen(3000, () => console.log('Tile server on :3000'));
+app.listen(3000, () => console.log('Server on :3000 port.'));
 
 async function downloadFileWithRetry(url) {
   try {
@@ -177,28 +232,6 @@ async function downloadFileWithRetry(url) {
   } catch (err) {
     console.error("Download error:", err.message);
     throw err;
-  }
-}
-
-async function readJson(filePath) {
-  try {
-    const data = await fs.readFile(filePath, "utf8");
-    return JSON.parse(data);
-  } catch (err) {
-    if (err.code === "ENOENT") {
-      await fs.writeFile(filePath, JSON.stringify(fallback, null, 2), "utf8");
-      return fallback;
-    }
-    throw err;
-  }
-}
-
-async function writeJson(filePath, obj) {
-  try {
-    const data = JSON.stringify(obj, null, 2);
-    await fs.writeFile(filePath, data, 'utf8');
-  } catch (err) {
-    console.error('Failed to write JSON:', err);
   }
 }
 
@@ -232,28 +265,6 @@ async function getSnapshotChanges(snapshotName, flag) {
     dates.sort((a, b) => b - a);
   }
   return dates;
-}
-
-function pathToDate(p) {
-  const [year, month, day, hour, minute] = p.trim().split(/\/+/);
-  return new Date(month-1, day, year, hour, minute);
-}
-
-function pathToFormatted(p) {
-  const [year, month, day, hour, minute] = p.trim().split(/\/+/);
-  return `${month}-${day}-${year} ${hour}:${minute}`;
-}
-
-function dateToPath(d) {
-  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}/${String(d.getHours()).padStart(2,'0')}/${String(d.getMinutes()).padStart(2,'0')}`
-}
-
-function dateToFormatted(d) {
-  return `${d.getMonth() + 1}-${d.getDate()}-${d.getFullYear()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 const rl = readline.createInterface({
@@ -312,7 +323,7 @@ rl.on('line', async (line) => {
       }
 
       while (queue.length > 0) {
-        const batch = queue.splice(0, limit);
+        const batch = queue.splice(0, DOWNLOAD_LIMIT);
         await Promise.all(batch.map(async ([x, y]) => {
           try {
             const tile_png = await downloadFileWithRetry(`https://backend.wplace.live/files/s0/tiles/${x}/${y}.png`);
@@ -323,11 +334,11 @@ rl.on('line', async (line) => {
             console.error(`Failed to load tile with tl X: ${x}, tl Y: ${y}:`, e.message);
           }
         }));
-        await sleep(400);
+        await sleep(DOWNLOAD_COOLDOWN);
       }
       console.log("All tiles saved successfully!");
 
-      let meta = await readJson(`data/snapshots/${name}/metadata.json`);
+      let meta = await readJson(`data/snapshots/${name}/metadata.json`, {createIfAbsent: true});
       if(!meta) {
         meta = {
           latest_date: "",
@@ -335,13 +346,12 @@ rl.on('line', async (line) => {
         }
       }
 
-      meta.latest_date = `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()}/${now.getHours()}/${now.getMinutes()}`;
+      meta.latest_date = `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()}/${String(now.getHours().padStart(2,'0'))}/${String(now.getMinutes().padStart(2,'0'))}`;
       meta.boundaries  = [tlx0, tly0, tlx1, tly1];
       //meta.dates.push(meta.latest_date);
       await writeJson(`data/snapshots/${name}/metadata.json`, meta);
 
       if(flags.includes('-s') || flags.includes('-switch')) {
-        clearCache();
         switchSnapshot(name, meta.latest_date);
       }
       break;
@@ -378,8 +388,6 @@ rl.on('line', async (line) => {
     case 'schedule':
       break;
     case 'load': {
-      clearCache();
-
       const [ , name, date, time] = args;
 
       let chosen_date = ""; // format with slashes 
@@ -408,21 +416,22 @@ rl.on('line', async (line) => {
         }
       }
 
-      if(flags.includes('-save')) {
-        const settings = await readJson('settings.json');
+      // Saves to settings 
 
-        SNAPSHOT_NAME = name;
-        
-        settings.current_snapshot = name;
-        settings.current_date = chosen_date;
+      settings = await readJson('settings.json');
 
-        writeJson("settings.json", settings);
-      }
+      settings.current_snapshot = name;
+      settings.current_date = chosen_date;
+
+      writeJson("settings.json", settings);
 
       switchSnapshot(name, chosen_date);
       console.log(`Snapshot was succefully loaded. The current snapshot is ${name}[${pathToFormatted(chosen_date)}].`)
 
       break;
+    }
+    case 'export': {
+      
     }
     case 'delete':
       break;

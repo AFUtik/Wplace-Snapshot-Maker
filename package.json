@@ -3,6 +3,7 @@
     "archiver": "^7.0.1",
     "axios": "^1.12.2",
     "canvas": "^3.2.0",
+    "compression": "^1.8.1",
     "express": "^5.1.0",
     "lru-cache": "^11.2.1"
   },

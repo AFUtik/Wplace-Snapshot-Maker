@@ -1,7 +1,8 @@
 {
-  "current_snapshot": "snapshot_0",
-  "current_date": "2025/9/25/19/28",
-
-  "tile_cache": 500,
-  "chunk_image_cache": 200
+  "current_snapshot": "ukraine",
+  "current_date": "2025/9/27/17/32",
+  "tile_cache": 300,
+  "chunk_image_cache": 500,
+  "download_cooldown": 1000,
+  "download_limit": 5
 }
