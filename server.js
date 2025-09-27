@@ -346,7 +346,7 @@ rl.on('line', async (line) => {
         }
       }
 
-      meta.latest_date = `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()}/${String(now.getHours().padStart(2,'0'))}/${String(now.getMinutes()).padStart(2,'0')}`;
+      meta.latest_date = `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()}/${String(now.getHours()).padStart(2,'0')}/${String(now.getMinutes()).padStart(2,'0')}`;
       meta.boundaries  = [tlx0, tly0, tlx1, tly1];
       //meta.dates.push(meta.latest_date);
       await writeJson(`data/snapshots/${name}/metadata.json`, meta);
