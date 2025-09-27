@@ -1,3 +1,7 @@
 {
-    "current_map": "none"
+  "current_snapshot": "snapshot_0",
+  "current_date": "2025/9/25/19/28",
+
+  "tile_cache": 500,
+  "chunk_image_cache": 200
 }
