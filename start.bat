@@ -22,3 +22,6 @@ if %NEED_INSTALL%==1 (
 call cls
 echo [run] nmp start
 call npm start
+
+:wait_input
+goto wait_input
