@@ -8,7 +8,6 @@ import { LRUCache } from 'lru-cache';
 
 import readline from 'readline';
 
-
 async function readJson(filePath, options = {}) {
   const { createIfAbsent = false, fallback = {} } = options;
 
@@ -41,7 +40,7 @@ function pathToDate(p) {
 
 function pathToFormatted(p) {
   const [year, month, day, hour, minute] = p.trim().split(/\/+/);
-  return `${month}-${day}-${year} ${hour}:${minute}`;
+  return `${month}/${day}/${year}-${hour}:${minute}`;
 }
 
 function dateToPath(d) {
@@ -49,7 +48,7 @@ function dateToPath(d) {
 }
 
 function dateToFormatted(d) {
-  return `${d.getMonth() + 1}-${d.getDate()}-${d.getFullYear()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`
+  return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}-${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`
 }
 
 function sleep(ms) {
@@ -57,6 +56,9 @@ function sleep(ms) {
 }
 
 let settings = await readJson('settings.json', {createIfAbsent: true})
+
+const CACHE_CONTROL = settings.cache_control;
+const CACHE_CONTROL_LIFETIME = settings.cache_control_lifetime;
 
 const TILE_CACHE = new LRUCache({
   max: settings.tile_cache,
@@ -128,6 +130,7 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
   if (cached) {
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Content-Length', String(cached.length));
+    res.setHeader('Cache-Control', 'public, max-age=60');
     return res.send(cached);
   }
 
@@ -145,61 +148,87 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
   const cy0 = Math.floor(py / CHUNK_SIZE);
   const cx1 = Math.floor((px + tileWorldWidth - 1) / CHUNK_SIZE);
   const cy1 = Math.floor((py + tileWorldHeight - 1) / CHUNK_SIZE);
-
+  const needed = [];
   for (let cx = cx0; cx <= cx1; cx++) {
     for (let cy = cy0; cy <= cy1; cy++) {
-      const p = chunkPath(cx, cy);
+      needed.push({ cx, cy, p: chunkPath(cx, cy) });
+    }
+  }
+  if (needed.length === 0) {
+    const emptyBuffer = canvas.toBuffer('image/png');
+    TILE_CACHE.set(cacheKey, emptyBuffer);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Content-Length', String(emptyBuffer.length));
+    if(CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${CACHE_CONTROL_LIFETIME}`);
+    return res.send(emptyBuffer);
+  }
 
-      try {
-        await fs.access(p);
-      } catch {
+  const concurrency = 6;
+  const loaded = [];
+  let idx = 0;
+  async function worker() {
+    while (true) {
+      const i = idx++;
+      if (i >= needed.length) return;
+      const { cx, cy, p } = needed[i];
+      const chunkKey = `${cx}_${cy}`;
+
+      const cachedImg = CHUNK_IMAGE_CACHE.get(chunkKey);
+      if (cachedImg) {
+        loaded.push({ cx, cy, img: cachedImg });
         continue;
       }
-
-      const chunkKey = `${cx}_${cy}`;
-      let img = CHUNK_IMAGE_CACHE.get(chunkKey);
-      if (!img) {
-        try {
-          const buffer = await fs.readFile(p);
-          img = await loadImage(buffer);
-          CHUNK_IMAGE_CACHE.set(chunkKey, img);
-        } catch (e) {
-          continue;
-        }
-      }
-
-      const chunkPx = cx * CHUNK_SIZE;
-      const chunkPy = cy * CHUNK_SIZE;
-
-      const sx = Math.max(0, px - chunkPx);
-      const sy = Math.max(0, py - chunkPy);
-      const ex = Math.min(CHUNK_SIZE, px + tileWorldWidth - chunkPx);
-      const ey = Math.min(CHUNK_SIZE, py + tileWorldHeight - chunkPy);
-      const sWidth = ex - sx;
-      const sHeight = ey - sy;
-      if (sWidth <= 0 || sHeight <= 0) continue;
-
-      const dstOffsetX_world = chunkPx + sx - px;
-      const dstOffsetY_world = chunkPy + sy - py;
-
-      const dx = Math.round(dstOffsetX_world / scale);
-      const dy = Math.round(dstOffsetY_world / scale);
-      const dw = Math.round(sWidth / scale);
-      const dh = Math.round(sHeight / scale);
-
       try {
-        ctx.drawImage(img, sx, sy, sWidth, sHeight, dx, dy, dw, dh);
-      } catch (e) {
-        console.error('drawImage error', e);
+        const buf = await fs.readFile(p);
+        const img = await loadImage(buf);
+        CHUNK_IMAGE_CACHE.set(chunkKey, img);
+        loaded.push({ cx, cy, img });
+      } catch (err) {
+        continue;
       }
     }
   }
+  await Promise.all(new Array(Math.min(concurrency, needed.length)).fill(0).map(() => worker()));
 
-  const buffer = canvas.toBuffer('image/png');
-  TILE_CACHE.set(cacheKey, buffer);
+  if (loaded.length === 0) {
+    const emptyBuffer = canvas.toBuffer('image/png');
+    TILE_CACHE.set(cacheKey, emptyBuffer);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Content-Length', String(emptyBuffer.length));
+    if(CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${CACHE_CONTROL_LIFETIME}`);
+    return res.send(emptyBuffer);
+  }
+
+  for (const { cx, cy, img } of loaded) {
+    const chunkPx = cx * CHUNK_SIZE;
+    const chunkPy = cy * CHUNK_SIZE;
+    const sx = Math.max(0, px - chunkPx);
+    const sy = Math.max(0, py - chunkPy);
+    const ex = Math.min(CHUNK_SIZE, px + tileWorldWidth - chunkPx);
+    const ey = Math.min(CHUNK_SIZE, py + tileWorldHeight - chunkPy);
+    const sWidth = ex - sx;
+    const sHeight = ey - sy;
+    if (sWidth <= 0 || sHeight <= 0) continue;
+    const dstOffsetX_world = chunkPx + sx - px;
+    const dstOffsetY_world = chunkPy + sy - py;
+    const dx = Math.round(dstOffsetX_world / scale);
+    const dy = Math.round(dstOffsetY_world / scale);
+    const dw = Math.round(sWidth / scale);
+    const dh = Math.round(sHeight / scale);
+    try {
+      ctx.drawImage(img, sx, sy, sWidth, sHeight, dx, dy, dw, dh);
+    } catch (e) {
+      console.error('drawImage error', e);
+    }
+  }
+
+  const outBuffer = canvas.toBuffer('image/png');
+  TILE_CACHE.set(cacheKey, outBuffer);
+
   res.setHeader('Content-Type', 'image/png');
-  res.setHeader('Content-Length', String(buffer.length));
-  res.send(buffer);
+  res.setHeader('Content-Length', String(outBuffer.length));
+  if(CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${CACHE_CONTROL_LIFETIME}`);
+  res.send(outBuffer);
 });
 
 app.post('/points', async (req, res) => {
@@ -210,7 +239,7 @@ app.post('/points', async (req, res) => {
   res.json({ status: "ok", received: req.body });
 }) 
 
-app.listen(3000, () => console.log('Server on :3000 port.'));
+app.listen(settings.server_port, "localhost", () => console.log(`Server on localhost:${settings.server_port}.`));
 
 async function downloadFileWithRetry(url) {
   try {
@@ -235,7 +264,7 @@ async function downloadFileWithRetry(url) {
   }
 }
 
-async function getSnapshotChanges(snapshotName, flag) {
+async function getSnapshotChanges(snapshotName, flag = "") {
   const snapshotPath = "data/snapshots/"+snapshotName;
 
   const files = await fs.readdir(snapshotPath, { withFileTypes: true }); 
@@ -367,7 +396,7 @@ rl.on('line', async (line) => {
 
           const [hour, minute] = time.trim().split(/[:\-\/]+/).map(Number);
         } else {
-          const dates = getSnapshotChanges(name, flags[0]);
+          const dates = await getSnapshotChanges(name, flags[0]);
           const formatted = dates.map(d => dateToFormatted(d));
 
           console.log("Dates:", formatted);
@@ -388,11 +417,19 @@ rl.on('line', async (line) => {
     case 'schedule':
       break;
     case 'load': {
-      const [ , name, date, time] = args;
+      const [ , name, date] = args;
 
       let chosen_date = ""; // format with slashes 
 
-      if(flags.length == 0 || flags.includes('-latest')) {
+      if (!name) {
+        if(!SNAPSHOT_NAME) name = SNAPSHOT_NAME;
+        else {
+          console.log("Name is not chosen.");
+          break;
+        }
+      }
+
+      if(!date && (flags.length == 0 || flags.includes('-latest'))) {
         const meta = await readJson(`data/snapshots/${name}/metadata.json`);
         if (!meta || !meta.latest_date) {
           console.error('Metadata.json is empty or corrupted.');
@@ -401,19 +438,15 @@ rl.on('line', async (line) => {
         chosen_date = meta.latest_date
       } else if (flags.includes('-next')) {
         // 
-      } else if(name) {
-        const [month = 0, day = 0, year = 0] = (date || "").trim().split(/[-/]+/).map(Number);
-        const [hour = 0, minute = 0] = (time || "").trim().split(/[:\-\/]+/).map(Number);
+      } else if(date) {
+        const [month = 0, day = 0, year = 0, hour = 0, minute = 0] = (date || "").trim().split(/[-/:/]+/).map(Number);
 
-        if(date && time) {
-          snapshotPath = `${name}/${year}/${month}/${day}/${hour}/${minute}`;
-          break;
-        } else {
-          const after = new Date(year, month-1, day, hour, minute)
-          const candidates = parsed.filter(d => d > after);
+        const after = new Date(year, month-1, day, hour, minute)
+        const dates = await getSnapshotChanges(name);
 
-          chosen_date = dateToPath(candidates[0]);
-        }
+        const candidates = dates.filter(d => d >= after);
+
+        chosen_date = dateToPath(candidates[0]);
       }
 
       // Saves to settings 
@@ -434,6 +467,29 @@ rl.on('line', async (line) => {
       
     }
     case 'delete':
+      const [ , name, date] = args;
+      if(name) {
+        try {
+          let path = ""
+          if(date) {
+            path = `data/snapshots/${name}/${date}`;
+          } else {
+            path = `data/snapshots/${name}`;
+          }
+          const stat = await fs.stat(path);
+          if(stat.isDirectory()) {
+            await fs.rm(path, { recursive: true, force: true });
+            console.log(`Snapshot was deleted.`);
+          }
+        } catch (err) {
+          if (err.code === "ENOENT") {
+            console.log("Snapshot not found");
+          } else {
+            console.error("Error while deleting:", err);
+          }
+        }
+      }
+      
       break;
     default:
       console.log(`Unknown Command: ${command}`);
