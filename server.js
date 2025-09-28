@@ -16,9 +16,8 @@ async function readJson(filePath, options = {}) {
   } catch (err) {
     if (err.code === "ENOENT" && options.createIfAbsent) {
       await fs.writeFile(filePath, JSON.stringify({}, null, 2), "utf8");
-      return {};
     }
-    throw err;
+    return {};
   }
 }
 
@@ -30,8 +29,6 @@ async function writeJson(filePath, obj) {
     console.error('Failed to write JSON:', err);
   }
 }
-
-
 
 function pathToDate(p) {
   const [year, month, day, hour, minute] = p.trim().split(/\/+/);
@@ -55,7 +52,36 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-let settings = await readJson('settings.json', {createIfAbsent: true})
+const DEFAULT_SETTINGS = {
+  current_snapshot: "",
+  current_date: "",
+  cache_control: true,
+  cache_control_lifetime: 60,
+  tile_cache: 300,
+  chunk_image_cache: 200,
+  download_cooldown: 1000,
+  download_limit: 5,
+  server_port: 3000,
+  min_zoom: 6
+};
+
+let settings = await readJson('settings.json')
+
+if (!settings || typeof settings !== 'object') {
+  settings = { ...DEFAULT_SETTINGS };
+  await writeJson('settings.json', settings); 
+} else {
+  let changed = false;
+  for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
+    if (!(key in settings)) {
+      settings[key] = value;
+      changed = true;
+    }
+  }
+  if (changed) {
+    await writeJson('settings.json', settings);
+  }
+}
 
 const CACHE_CONTROL = settings.cache_control;
 const CACHE_CONTROL_LIFETIME = settings.cache_control_lifetime;
