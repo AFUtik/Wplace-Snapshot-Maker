@@ -1,4 +1,5 @@
 @echo off
+setlocal enabledelayedexpansion
 
 echo Verifying Git Installation...
 git --version >nul 2>&1
