@@ -1,6 +1,6 @@
 {
-  "current_snapshot": "test2",
-  "current_date": "2025/9/28/17/13",
+  "current_snapshot": "",
+  "current_date": "",
   "cache_control": true,
   "cache_control_lifetime": 60,
   "tile_cache": 300,
@@ -8,5 +8,5 @@
   "download_cooldown": 1000,
   "download_limit": 5,
   "server_port": 3000,
-  "min_zoom": 8
+  "min_zoom": 6
 }
