@@ -135,77 +135,47 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
   const y = Number(req.params.y);
   const cacheKey = `${z}_${x}_${y}`;
 
-  const priority = z;
+  const priority = z * z;
   renderQueue.add(async () => {
-    try {
-      const canvas = createCanvas(TILE_SIZE, TILE_SIZE);
-      const ctx = canvas.getContext('2d');
+    const canvas = createCanvas(TILE_SIZE, TILE_SIZE);
+    const ctx = canvas.getContext('2d');
 
-      ctx.clearRect(0, 0, TILE_SIZE, TILE_SIZE);
+    ctx.clearRect(0, 0, TILE_SIZE, TILE_SIZE);
 
-      const { px, py, scale } = tileToPixel(z, x, y);
+    const { px, py, scale } = tileToPixel(z, x, y);
 
-      const tileWorldWidth  = Math.round(TILE_SIZE * scale);
-      const tileWorldHeight = Math.round(TILE_SIZE * scale);
+    const tileWorldWidth  = Math.round(TILE_SIZE * scale);
+    const tileWorldHeight = Math.round(TILE_SIZE * scale);
 
-      const cx0 = Math.floor(px / CHUNK_SIZE);
-      const cy0 = Math.floor(py / CHUNK_SIZE);
-      const cx1 = Math.floor((px + tileWorldWidth - 1) / CHUNK_SIZE);
-      const cy1 = Math.floor((py + tileWorldHeight - 1) / CHUNK_SIZE);
-      const needed = [];
-      for (let cx = cx0; cx <= cx1; cx++) {
-        for (let cy = cy0; cy <= cy1; cy++) {
-          needed.push({ cx, cy, p: chunkPath(cx, cy) });
+    const cx0 = Math.floor(px / CHUNK_SIZE);
+    const cy0 = Math.floor(py / CHUNK_SIZE);
+    const cx1 = Math.floor((px + tileWorldWidth - 1) / CHUNK_SIZE);
+    const cy1 = Math.floor((py + tileWorldHeight - 1) / CHUNK_SIZE);
+
+    for (let cx = cx0; cx <= cx1; cx++) {
+      for (let cy = cy0; cy <= cy1; cy++) {
+        const p = chunkPath(cx, cy);
+
+        try {
+          await fs.access(p);
+        } catch {
+          continue;
         }
-      }
-      if (needed.length === 0) {
-        const emptyBuffer = canvas.toBuffer('image/png');
-        TILE_CACHE.set(cacheKey, emptyBuffer);
-        res.setHeader('Content-Type', 'image/png');
-        res.setHeader('Content-Length', String(emptyBuffer.length));
-        if(CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${CACHE_CONTROL_LIFETIME}`);
-        return res.send(emptyBuffer);
-      }
 
-      const concurrency = 6;
-      const loaded = [];
-      let idx = 0;
-      async function worker() {
-        while (true) {
-          const i = idx++;
-          if (i >= needed.length) return;
-          const { cx, cy, p } = needed[i];
-          const chunkKey = `${cx}_${cy}`;
-
-          const cachedImg = CHUNK_IMAGE_CACHE.get(chunkKey);
-          if (cachedImg) {
-            loaded.push({ cx, cy, img: cachedImg });
-            continue;
-          }
+        const chunkKey = `${cx}_${cy}`;
+        let img = CHUNK_IMAGE_CACHE.get(chunkKey);
+        if (!img) {
           try {
-            const buf = await fs.readFile(p);
-            const img = await loadImage(buf);
+            img = await loadImage(p);
             CHUNK_IMAGE_CACHE.set(chunkKey, img);
-            loaded.push({ cx, cy, img });
-          } catch (err) {
+          } catch (e) {
             continue;
           }
         }
-      }
-      await Promise.all(new Array(Math.min(concurrency, needed.length)).fill(0).map(() => worker()));
 
-      if (loaded.length === 0) {
-        const emptyBuffer = canvas.toBuffer('image/png');
-        TILE_CACHE.set(cacheKey, emptyBuffer);
-        res.setHeader('Content-Type', 'image/png');
-        res.setHeader('Content-Length', String(emptyBuffer.length));
-        if(CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${CACHE_CONTROL_LIFETIME}`);
-        return res.send(emptyBuffer);
-      }
-
-      for (const { cx, cy, img } of loaded) {
         const chunkPx = cx * CHUNK_SIZE;
         const chunkPy = cy * CHUNK_SIZE;
+
         const sx = Math.max(0, px - chunkPx);
         const sy = Math.max(0, py - chunkPy);
         const ex = Math.min(CHUNK_SIZE, px + tileWorldWidth - chunkPx);
@@ -213,28 +183,43 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
         const sWidth = ex - sx;
         const sHeight = ey - sy;
         if (sWidth <= 0 || sHeight <= 0) continue;
+
         const dstOffsetX_world = chunkPx + sx - px;
         const dstOffsetY_world = chunkPy + sy - py;
+
         const dx = Math.round(dstOffsetX_world / scale);
         const dy = Math.round(dstOffsetY_world / scale);
         const dw = Math.round(sWidth / scale);
         const dh = Math.round(sHeight / scale);
+
         try {
           ctx.drawImage(img, sx, sy, sWidth, sHeight, dx, dy, dw, dh);
         } catch (e) {
           console.error('drawImage error', e);
         }
       }
-
-      const stream = canvas.createPNGStream();
-
-      res.setHeader('Content-Type', 'image/png');
-      if (CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${CACHE_CONTROL_LIFETIME}`);
-      stream.pipe(res);
-    } catch (err) {
-      console.error("Render error:", err);
-      res.status(500).end("Tile render error");
     }
+
+    const buffer = canvas.toBuffer('image/png');
+    TILE_CACHE.set(cacheKey, buffer);
+    res.setHeader('Content-Type', 'image/png');
+    if (CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${CACHE_CONTROL_LIFETIME}`);
+    
+    const stream = canvas.createPNGStream();
+    const chunks = [];
+
+    stream.on("data", (chunk) => chunks.push(chunk));
+    stream.on("end", () => {
+      if (!res.writableEnded) {
+        const buf = Buffer.concat(chunks);
+        TILE_CACHE.set(cacheKey, buf);
+        res.end(buf);
+      }
+    });
+
+    req.on("close", () => {
+      stream.destroy();
+    });
   }, { priority });
 });
 
