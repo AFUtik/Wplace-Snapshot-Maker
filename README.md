@@ -8,7 +8,7 @@ __Wplace Snapshot Maker__ - This is a local server on your PC that can take snap
 May be outdated.
 
 # Installation
-You need to make sure you have an environment to execute `node.js` on your computer. If it is missing, you can download it here https://nodejs.org/en/download. It is recommended to copy the repository using the command: git clone https://github.com/AFUtik/Wplace-Shapshot-Maker.git`
+You need to make sure you have an environment to execute `node.js` on your computer. If it is missing, you can download it here https://nodejs.org/en/download. It is recommended to copy the repository using the command: `git clone https://github.com/AFUtik/Wplace-Shapshot-Maker.git`
 or download the repository archive and unpack it. After downloading the repository, run `start.bat` on Windows or `start.sh` if you have a Linux system. All necessary libraries will be installed in the root part of the project. After starting the server, open `localhost:3000` in your browser to go to the site. You can set your port in the `settings.json`.
 
 # Usage
