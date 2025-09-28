@@ -32,6 +32,7 @@ async function writeJson(filePath, obj) {
 }
 
 
+
 function pathToDate(p) {
   const [year, month, day, hour, minute] = p.trim().split(/\/+/);
   return new Date(month-1, day, year, hour, minute);
@@ -126,6 +127,16 @@ function normalizeCorners(p1, p2) {
 app.use(express.json());
 
 app.use(express.static(path.join(process.cwd(), 'public')));
+
+app.get("/settings.json", async (req, res) => {
+  try {
+    const data = await fs.readFile("settings.json", "utf8");
+    res.setHeader("Content-Type", "application/json");
+    res.send(data);
+  } catch (err) {
+    res.status(500).send({ error: "Failed to load settings.json" });
+  }
+});
 
 const renderQueue = new PQueue({concurrency: 4});
 
@@ -298,19 +309,103 @@ async function getSnapshotChanges(snapshotName, flag = "") {
   return dates;
 }
 
+async function getSnapshotSize(snapshotName, options = {saveMeta: true, preciseLoc: ""}) {
+  const meta = await readJson(`data/snapshots/${snapshotName}/metadata.json`)
+
+  if(options.preciseLoc) {
+    if(meta && options.preciseLoc in meta.memory_cache) {
+      return meta.memory_cache[folderPath];
+    }
+
+    const tiles = await fs.readdir(options.preciseLoc);
+    let snapshotSize = 0;
+
+    for (const tile of tiles) {
+      const stats = await fs.stat(path.join(options.preciseLoc, tile));
+      snapshotSize += stats.size;
+    }
+
+    if(options.saveMeta) meta.memory_cache[options.preciseLoc] = snapshotSize;
+    return snapshotSize;
+  }
+
+  const queue = [{ path: `data/snapshots/${snapshotName}`, depth: 0 }];
+  const resultFolders = [];
+
+  while (queue.length) {
+    const { path: currentPath, depth } = queue.shift();
+
+    if (depth === 5) {
+      resultFolders.push(currentPath);
+      continue;
+    }
+
+    try {
+      const entries = await fs.readdir(currentPath, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          queue.push({ path: path.join(currentPath, entry.name), depth: depth + 1 });
+        }
+      }
+    } catch (err) {
+      console.error('Error reading folder:', currentPath, err);
+    }
+  }
+  
+  let totalSize = 0;
+
+  for(const folderPath of resultFolders) {
+    if(meta && folderPath in meta.memory_cache) {
+      totalSize+=meta.memory_cache[folderPath];
+      continue;
+    }
+
+    const tiles = await fs.readdir(folderPath);
+    let snapshotSize = 0;
+
+    for (const tile of tiles) {
+      const stats = await fs.stat(path.join(folderPath, tile));
+      snapshotSize += stats.size;
+    }
+
+    if(options.saveMeta) meta.memory_cache[folderPath] = snapshotSize;
+
+    totalSize += snapshotSize;
+  }
+
+  await writeJson(`data/snapshots/${snapshotName}/metadata.json`, meta);
+
+  return totalSize;
+}
+
+
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout,
   prompt: '> '
 });
 
+function ask(rl, query) {
+  return new Promise(resolve => rl.question(query, resolve));
+}
+
 rl.prompt();
 
 rl.on('line', async (line) => {
   const allArgs = line.trim().split(/\s+/);
 
-  const flags = allArgs.filter(arg =>  arg.startsWith('-'));
-  const args  = allArgs.filter(arg => !arg.startsWith('-'));
+  const params = [];
+  const remainingArgs = allArgs.filter(arg => {
+    const match = arg.match(/^--(\w+)=(.+)$/);
+    if (match) {
+      params.push({ key: match[1], value: match[2] });
+      return false;
+    }
+    return true;
+  });
+
+  const flags = remainingArgs.filter(arg =>  arg.startsWith('-'));
+  const args  = remainingArgs.filter(arg => !arg.startsWith('-'));
 
   const command = args[0];
 
@@ -323,9 +418,9 @@ rl.on('line', async (line) => {
       process.exit(0);
     case 'snapshot': {
       let [ , name, tlx0, tly0, tlx1, tly1] = args;
-      
+
       if(!name) {
-        if(!SNAPSHOT_NAME) {
+        if(SNAPSHOT_NAME) {
           name = SNAPSHOT_NAME;
         } else {
           console.log("Name is not defined.");
@@ -337,6 +432,22 @@ rl.on('line', async (line) => {
       if(await folderExists(`data/snapshots/${name}`)) {
         meta = await readJson(`data/snapshots/${name}/metadata.json`, {createIfAbsent: true});
       }
+
+      else {
+        meta = {
+          latest_date: "",
+          boundaries:  [],
+          limit: 0,
+          memory_cache: {}
+        }
+      }
+      
+      let limit = meta.limit;
+
+      const limitParam = params.find(p => p.key === 'limit');
+      if (limitParam) {
+        limit = Number(limitParam.value) * 1024 * 1024;
+      }
     
       if(!tlx0) {
         if(AREA.length > 0) {
@@ -344,7 +455,7 @@ rl.on('line', async (line) => {
           tly0 = AREA[0][1];
           tlx1 = AREA[1][0];
           tly1 = AREA[1][1];
-        } else if(meta && meta.boundaries) {
+        } else if(meta.boundaries) {
           tlx0 = meta.boundaries[0];
           tly0 = meta.boundaries[1];
           tlx1 = meta.boundaries[2];
@@ -368,11 +479,13 @@ rl.on('line', async (line) => {
         }
       }
 
+      let downloadSize = 0;
       while (queue.length > 0) {
         const batch = queue.splice(0, DOWNLOAD_LIMIT);
         await Promise.all(batch.map(async ([x, y]) => {
           try {
             const tile_png = await downloadFileWithRetry(`https://backend.wplace.live/files/s0/tiles/${x}/${y}.png`);
+            downloadSize += tile_png.length;
             const tilePath = path.join(folderPath, `${x}_${y}.png`);
             await fs.writeFile(tilePath, tile_png);
             console.log(`Saved tile: ${tilePath}`);
@@ -382,18 +495,43 @@ rl.on('line', async (line) => {
         }));
         await sleep(DOWNLOAD_COOLDOWN);
       }
-      console.log("All tiles saved successfully!");
 
-      
-      if(!meta) {
-        meta = {
-          latest_date: "",
-          boundaries:  []
+      if(limit != 0) {
+        const sizeBefore = await getSnapshotSize(name, {saveMeta: false});
+        let newSize    = sizeBefore + downloadSize;
+
+        if(newSize > limit) {
+          const changes = await getSnapshotChanges(name, '-a')
+          const deletePaths = [];
+          for(const change of changes) {
+            if(newSize > limit) {
+              const __path = `data/snapshots/${name}/${dateToPath(change)}`
+
+              newSize -= await getSnapshotSize(name, {saveMeta: false, preciseLoc: __path});
+              deletePaths.push(__path);
+            } else break;
+          }
+
+          const answer = await ask(rl, `You're going to delete ${deletePaths.length} change(s) of '${name}' to free disk space. Are you sure? Write y/n to confirm: `)
+          if(['y', 'yes'].includes(answer.trim().toLowerCase())) {
+            for(const deletePath of deletePaths) {
+              try {
+                await fs.rm(deletePath, { recursive: true, force: true });
+              } catch(e) {
+                console.log("Failed to delete changes.")
+              }
+            }
+          } else {
+            console.log("Tip: You can expand limit by command `limit <your limit in megabytes>`")
+          }
         }
+        
       }
+      console.log("All tiles saved successfully!");
 
       meta.latest_date = `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()}/${String(now.getHours()).padStart(2,'0')}/${String(now.getMinutes()).padStart(2,'0')}`;
       meta.boundaries  = [tlx0, tly0, tlx1, tly1];
+      meta.limit = limit;
 
       await writeJson(`data/snapshots/${name}/metadata.json`, meta);
 
@@ -405,13 +543,11 @@ rl.on('line', async (line) => {
     case 'update':
       break;
     case 'show': {
-      const [ , name, date, time] = args;
+      const [ , name, date] = args;
 
       if(name) {
         if(date) {
-          const [month, day, year] = date.trim().split(/[-/]+/).map(Number);
-
-          const [hour, minute] = time.trim().split(/[:\-\/]+/).map(Number);
+          const [month, day, year, hour, minute] = date.trim().split(/[-/]+/).map(Number);
         } else {
           const dates = await getSnapshotChanges(name, flags[0]);
           const formatted = dates.map(d => dateToFormatted(d));
@@ -429,6 +565,17 @@ rl.on('line', async (line) => {
         }
       }
 
+      break;
+    }
+    case 'limit': {
+      const [, name, value] = args;
+      const meta = await readJson(`data/snapshots/${name}/metadata.json`)
+
+      meta.limit = value * 1024 * 1024;
+
+      await writeJson(`data/snapshots/${name}/metadata.json`, meta);
+
+      console.log(`'${name}' was limited.`)
       break;
     }
     case 'schedule':
@@ -473,8 +620,26 @@ rl.on('line', async (line) => {
 
       break;
     }
-    case 'export': {
-      
+    case 'memory': {
+      const [, name] = args;
+
+      if(name) {
+        const snapshotSize = await getSnapshotSize(name);
+        console.log(`${name} - ${(snapshotSize/(1024*1024)).toFixed(2)} mb`);
+      } else {
+        let total = 0;
+
+        const snapshots = await fs.readdir("data/snapshots", { withFileTypes: true });
+        for(const snapshot of snapshots) {
+          const snapshotSize = await getSnapshotSize(snapshot.name);
+          console.log(`${snapshot.name} - ${(snapshotSize/(1024*1024)).toFixed(2)} mb`);
+
+          total += snapshotSize;
+        }
+
+        console.log(`Total memory usage of the disk: ${(total/(1024*1024)).toFixed(2)} mb.`, );
+      }
+      break;
     }
     case 'current': {
       console.log(SNAPSHOT_NAME, SNAPSHOT_PATH);
