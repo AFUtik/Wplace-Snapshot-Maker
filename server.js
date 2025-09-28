@@ -2,6 +2,7 @@ import express from 'express';
 import fs from 'fs/promises';
 import path from 'path';
 import axios from "axios";
+import PQueue from "p-queue";
 
 import { createCanvas, loadImage } from 'canvas';
 import { LRUCache } from 'lru-cache';
@@ -9,15 +10,13 @@ import { LRUCache } from 'lru-cache';
 import readline from 'readline';
 
 async function readJson(filePath, options = {}) {
-  const { createIfAbsent = false, fallback = {} } = options;
-
   try {
     const data = await fs.readFile(filePath, "utf8");
     return JSON.parse(data);
   } catch (err) {
-    if (err.code === "ENOENT" && createIfAbsent) {
-      await fs.writeFile(filePath, JSON.stringify(fallback, null, 2), "utf8");
-      return fallback;
+    if (err.code === "ENOENT" && options.createIfAbsent) {
+      await fs.writeFile(filePath, JSON.stringify({}, null, 2), "utf8");
+      return {};
     }
     throw err;
   }
@@ -86,11 +85,19 @@ function clearCache() {
   TILE_CACHE.clear();
   CHUNK_IMAGE_CACHE.clear();
 }
-function switchSnapshot(name, date) {
+
+async function switchSnapshot(name, date) {
   clearCache();
     
   SNAPSHOT_PATH = name + '/' + date;
   SNAPSHOT_NAME = name;
+
+  settings = await readJson('settings.json');
+
+  settings.current_snapshot = name;
+  settings.current_date = date;
+  
+  writeJson("settings.json", settings);
 }
 
 function chunkPath(cx, cy) {
@@ -120,115 +127,115 @@ app.use(express.json());
 
 app.use(express.static(path.join(process.cwd(), 'public')));
 
+const renderQueue = new PQueue({concurrency: 4});
+
 app.get('/tiles/:z/:x/:y.png', async (req, res) => {
   const z = Number(req.params.z);
   const x = Number(req.params.x);
   const y = Number(req.params.y);
   const cacheKey = `${z}_${x}_${y}`;
 
-  const cached = TILE_CACHE.get(cacheKey);
-  if (cached) {
-    res.setHeader('Content-Type', 'image/png');
-    res.setHeader('Content-Length', String(cached.length));
-    res.setHeader('Cache-Control', 'public, max-age=60');
-    return res.send(cached);
-  }
-
-  const canvas = createCanvas(TILE_SIZE, TILE_SIZE);
-  const ctx = canvas.getContext('2d');
-
-  ctx.clearRect(0, 0, TILE_SIZE, TILE_SIZE);
-
-  const { px, py, scale } = tileToPixel(z, x, y);
-
-  const tileWorldWidth  = Math.round(TILE_SIZE * scale);
-  const tileWorldHeight = Math.round(TILE_SIZE * scale);
-
-  const cx0 = Math.floor(px / CHUNK_SIZE);
-  const cy0 = Math.floor(py / CHUNK_SIZE);
-  const cx1 = Math.floor((px + tileWorldWidth - 1) / CHUNK_SIZE);
-  const cy1 = Math.floor((py + tileWorldHeight - 1) / CHUNK_SIZE);
-  const needed = [];
-  for (let cx = cx0; cx <= cx1; cx++) {
-    for (let cy = cy0; cy <= cy1; cy++) {
-      needed.push({ cx, cy, p: chunkPath(cx, cy) });
-    }
-  }
-  if (needed.length === 0) {
-    const emptyBuffer = canvas.toBuffer('image/png');
-    TILE_CACHE.set(cacheKey, emptyBuffer);
-    res.setHeader('Content-Type', 'image/png');
-    res.setHeader('Content-Length', String(emptyBuffer.length));
-    if(CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${CACHE_CONTROL_LIFETIME}`);
-    return res.send(emptyBuffer);
-  }
-
-  const concurrency = 6;
-  const loaded = [];
-  let idx = 0;
-  async function worker() {
-    while (true) {
-      const i = idx++;
-      if (i >= needed.length) return;
-      const { cx, cy, p } = needed[i];
-      const chunkKey = `${cx}_${cy}`;
-
-      const cachedImg = CHUNK_IMAGE_CACHE.get(chunkKey);
-      if (cachedImg) {
-        loaded.push({ cx, cy, img: cachedImg });
-        continue;
-      }
-      try {
-        const buf = await fs.readFile(p);
-        const img = await loadImage(buf);
-        CHUNK_IMAGE_CACHE.set(chunkKey, img);
-        loaded.push({ cx, cy, img });
-      } catch (err) {
-        continue;
-      }
-    }
-  }
-  await Promise.all(new Array(Math.min(concurrency, needed.length)).fill(0).map(() => worker()));
-
-  if (loaded.length === 0) {
-    const emptyBuffer = canvas.toBuffer('image/png');
-    TILE_CACHE.set(cacheKey, emptyBuffer);
-    res.setHeader('Content-Type', 'image/png');
-    res.setHeader('Content-Length', String(emptyBuffer.length));
-    if(CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${CACHE_CONTROL_LIFETIME}`);
-    return res.send(emptyBuffer);
-  }
-
-  for (const { cx, cy, img } of loaded) {
-    const chunkPx = cx * CHUNK_SIZE;
-    const chunkPy = cy * CHUNK_SIZE;
-    const sx = Math.max(0, px - chunkPx);
-    const sy = Math.max(0, py - chunkPy);
-    const ex = Math.min(CHUNK_SIZE, px + tileWorldWidth - chunkPx);
-    const ey = Math.min(CHUNK_SIZE, py + tileWorldHeight - chunkPy);
-    const sWidth = ex - sx;
-    const sHeight = ey - sy;
-    if (sWidth <= 0 || sHeight <= 0) continue;
-    const dstOffsetX_world = chunkPx + sx - px;
-    const dstOffsetY_world = chunkPy + sy - py;
-    const dx = Math.round(dstOffsetX_world / scale);
-    const dy = Math.round(dstOffsetY_world / scale);
-    const dw = Math.round(sWidth / scale);
-    const dh = Math.round(sHeight / scale);
+  const priority = z;
+  renderQueue.add(async () => {
     try {
-      ctx.drawImage(img, sx, sy, sWidth, sHeight, dx, dy, dw, dh);
-    } catch (e) {
-      console.error('drawImage error', e);
+      const canvas = createCanvas(TILE_SIZE, TILE_SIZE);
+      const ctx = canvas.getContext('2d');
+
+      ctx.clearRect(0, 0, TILE_SIZE, TILE_SIZE);
+
+      const { px, py, scale } = tileToPixel(z, x, y);
+
+      const tileWorldWidth  = Math.round(TILE_SIZE * scale);
+      const tileWorldHeight = Math.round(TILE_SIZE * scale);
+
+      const cx0 = Math.floor(px / CHUNK_SIZE);
+      const cy0 = Math.floor(py / CHUNK_SIZE);
+      const cx1 = Math.floor((px + tileWorldWidth - 1) / CHUNK_SIZE);
+      const cy1 = Math.floor((py + tileWorldHeight - 1) / CHUNK_SIZE);
+      const needed = [];
+      for (let cx = cx0; cx <= cx1; cx++) {
+        for (let cy = cy0; cy <= cy1; cy++) {
+          needed.push({ cx, cy, p: chunkPath(cx, cy) });
+        }
+      }
+      if (needed.length === 0) {
+        const emptyBuffer = canvas.toBuffer('image/png');
+        TILE_CACHE.set(cacheKey, emptyBuffer);
+        res.setHeader('Content-Type', 'image/png');
+        res.setHeader('Content-Length', String(emptyBuffer.length));
+        if(CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${CACHE_CONTROL_LIFETIME}`);
+        return res.send(emptyBuffer);
+      }
+
+      const concurrency = 6;
+      const loaded = [];
+      let idx = 0;
+      async function worker() {
+        while (true) {
+          const i = idx++;
+          if (i >= needed.length) return;
+          const { cx, cy, p } = needed[i];
+          const chunkKey = `${cx}_${cy}`;
+
+          const cachedImg = CHUNK_IMAGE_CACHE.get(chunkKey);
+          if (cachedImg) {
+            loaded.push({ cx, cy, img: cachedImg });
+            continue;
+          }
+          try {
+            const buf = await fs.readFile(p);
+            const img = await loadImage(buf);
+            CHUNK_IMAGE_CACHE.set(chunkKey, img);
+            loaded.push({ cx, cy, img });
+          } catch (err) {
+            continue;
+          }
+        }
+      }
+      await Promise.all(new Array(Math.min(concurrency, needed.length)).fill(0).map(() => worker()));
+
+      if (loaded.length === 0) {
+        const emptyBuffer = canvas.toBuffer('image/png');
+        TILE_CACHE.set(cacheKey, emptyBuffer);
+        res.setHeader('Content-Type', 'image/png');
+        res.setHeader('Content-Length', String(emptyBuffer.length));
+        if(CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${CACHE_CONTROL_LIFETIME}`);
+        return res.send(emptyBuffer);
+      }
+
+      for (const { cx, cy, img } of loaded) {
+        const chunkPx = cx * CHUNK_SIZE;
+        const chunkPy = cy * CHUNK_SIZE;
+        const sx = Math.max(0, px - chunkPx);
+        const sy = Math.max(0, py - chunkPy);
+        const ex = Math.min(CHUNK_SIZE, px + tileWorldWidth - chunkPx);
+        const ey = Math.min(CHUNK_SIZE, py + tileWorldHeight - chunkPy);
+        const sWidth = ex - sx;
+        const sHeight = ey - sy;
+        if (sWidth <= 0 || sHeight <= 0) continue;
+        const dstOffsetX_world = chunkPx + sx - px;
+        const dstOffsetY_world = chunkPy + sy - py;
+        const dx = Math.round(dstOffsetX_world / scale);
+        const dy = Math.round(dstOffsetY_world / scale);
+        const dw = Math.round(sWidth / scale);
+        const dh = Math.round(sHeight / scale);
+        try {
+          ctx.drawImage(img, sx, sy, sWidth, sHeight, dx, dy, dw, dh);
+        } catch (e) {
+          console.error('drawImage error', e);
+        }
+      }
+
+      const stream = canvas.createPNGStream();
+
+      res.setHeader('Content-Type', 'image/png');
+      if (CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${CACHE_CONTROL_LIFETIME}`);
+      stream.pipe(res);
+    } catch (err) {
+      console.error("Render error:", err);
+      res.status(500).end("Tile render error");
     }
-  }
-
-  const outBuffer = canvas.toBuffer('image/png');
-  TILE_CACHE.set(cacheKey, outBuffer);
-
-  res.setHeader('Content-Type', 'image/png');
-  res.setHeader('Content-Length', String(outBuffer.length));
-  if(CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${CACHE_CONTROL_LIFETIME}`);
-  res.send(outBuffer);
+  }, { priority });
 });
 
 app.post('/points', async (req, res) => {
@@ -239,7 +246,17 @@ app.post('/points', async (req, res) => {
   res.json({ status: "ok", received: req.body });
 }) 
 
-app.listen(settings.server_port, "localhost", () => console.log(`Server on localhost:${settings.server_port}.`));
+app.listen(settings.server_port, () => console.log(`Server on localhost:${settings.server_port}.`));
+
+async function folderExists(folderPath) {
+  try {
+    const stats = await fs.stat(folderPath);
+    return stats.isDirectory();
+  } catch (err) {
+    if (err.code === 'ENOENT') return false; 
+    throw err; 
+  }
+}
 
 async function downloadFileWithRetry(url) {
   try {
@@ -323,15 +340,30 @@ rl.on('line', async (line) => {
       let [ , name, tlx0, tly0, tlx1, tly1] = args;
       
       if(!name) {
-        name = SNAPSHOT_NAME;
+        if(!SNAPSHOT_NAME) {
+          name = SNAPSHOT_NAME;
+        } else {
+          console.log("Name is not defined.");
+          break;
+        }
       } 
-      
+
+      let meta = {};
+      if(await folderExists(`data/snapshots/${name}`)) {
+        meta = await readJson(`data/snapshots/${name}/metadata.json`, {createIfAbsent: true});
+      }
+    
       if(!tlx0) {
         if(AREA.length > 0) {
           tlx0 = AREA[0][0];
           tly0 = AREA[0][1];
           tlx1 = AREA[1][0];
           tly1 = AREA[1][1];
+        } else if(meta && meta.boundaries) {
+          tlx0 = meta.boundaries[0];
+          tly0 = meta.boundaries[1];
+          tlx1 = meta.boundaries[2];
+          tly1 = meta.boundaries[3];
         } else {
           console.log("Points are not defined.")
           break;
@@ -367,7 +399,7 @@ rl.on('line', async (line) => {
       }
       console.log("All tiles saved successfully!");
 
-      let meta = await readJson(`data/snapshots/${name}/metadata.json`, {createIfAbsent: true});
+      
       if(!meta) {
         meta = {
           latest_date: "",
@@ -377,11 +409,11 @@ rl.on('line', async (line) => {
 
       meta.latest_date = `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()}/${String(now.getHours()).padStart(2,'0')}/${String(now.getMinutes()).padStart(2,'0')}`;
       meta.boundaries  = [tlx0, tly0, tlx1, tly1];
-      //meta.dates.push(meta.latest_date);
+
       await writeJson(`data/snapshots/${name}/metadata.json`, meta);
 
       if(flags.includes('-s') || flags.includes('-switch')) {
-        switchSnapshot(name, meta.latest_date);
+        await switchSnapshot(name, meta.latest_date);
       }
       break;
     }
@@ -451,20 +483,16 @@ rl.on('line', async (line) => {
 
       // Saves to settings 
 
-      settings = await readJson('settings.json');
-
-      settings.current_snapshot = name;
-      settings.current_date = chosen_date;
-
-      writeJson("settings.json", settings);
-
-      switchSnapshot(name, chosen_date);
+      await switchSnapshot(name, chosen_date);
       console.log(`Snapshot was succefully loaded. The current snapshot is ${name}[${pathToFormatted(chosen_date)}].`)
 
       break;
     }
     case 'export': {
       
+    }
+    case 'current': {
+      console.log(SNAPSHOT_NAME, SNAPSHOT_PATH);
     }
     case 'delete':
       const [ , name, date] = args;

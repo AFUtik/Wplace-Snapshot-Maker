@@ -1,7 +1,7 @@
 {
-  "current_snapshot": "lol",
-  "current_date": "2025/9/27/17/26",
-  "cache_control": false,
+  "current_snapshot": "ukraine",
+  "current_date": "2025/9/27/17/32",
+  "cache_control": true,
   "cache_control_lifetime": 60,
   "tile_cache": 300,
   "chunk_image_cache": 200,
