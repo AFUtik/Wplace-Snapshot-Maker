@@ -22,7 +22,8 @@ const DEFAULT_SETTINGS = {
   download_cooldown: 1000,
   download_limit: 5,
   server_port: 3000,
-  min_zoom: 6
+  min_zoom: 6,
+  concurrency: 4
 };
 
 let settings = await utils.readJson('settings.json')
@@ -51,6 +52,8 @@ class Context {
       output: process.stdout,
       prompt: '> '
     });
+
+    this.CONCURRENCY = settings.concurrency;
 
     this.TILE_CACHE        = new LRUCache({max: settings.tile_cache,});
     this.CHUNK_IMAGE_CACHE = new LRUCache({max: settings.chunk_image_cache});
@@ -132,7 +135,7 @@ app.get("/settings.json", async (req, res) => {
   }
 });
 
-const renderQueue = new PQueue({concurrency: 4});
+const renderQueue = new PQueue({concurrency: context.CONCURRENCY});
 
 app.get('/tiles/:z/:x/:y.png', async (req, res) => {
   const z = Number(req.params.z);
@@ -240,7 +243,8 @@ const commands = {
   current:  cmd.handleCurrent,
   memory:   cmd.handleMemory,
   show:     cmd.handleShow,
-  limit:    cmd.handleLimit
+  limit:    cmd.handleLimit,
+  image:    cmd.handleImage
 }
 
 function parseInput(line) {

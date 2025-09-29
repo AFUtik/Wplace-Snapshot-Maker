@@ -2,6 +2,8 @@ import * as utils from "./utils.js"
 import fs from 'fs/promises';
 import path from "path";
 
+import { createCanvas, Image } from 'canvas';
+
 const DEFAULT_META = {
     latest_date: "",
     boundaries: [],
@@ -329,4 +331,45 @@ export async function handleLimit(ctx, input) {
     await utils.writeJson(`data/snapshots/${name}/metadata.json`, meta);
 
     console.log(`'${name}' was limited.`)
+}
+
+export async function handleImage(ctx, input) {
+    const [, img_name] = input.args;
+
+    const tlx0 = ctx.AREA[0][0];
+    const tly0 = ctx.AREA[0][1];
+    const tlx1 = ctx.AREA[1][0];
+    const tly1 = ctx.AREA[1][1];
+    
+    const width = (tlx1 - tlx0 + 1) * 1000;
+    const height = (tly0 - tly1 + 1) * 1000;
+    const canvas = createCanvas(width, height);
+    const __ctx = canvas.getContext('2d');
+
+    const tiles = [];
+    for (let cy = tly0; cy >= tly1; cy--) {
+        for (let cx = tlx0; cx <= tlx1; cx++) {
+            tiles.push({ cx, cy });
+        }
+    }
+
+    for (let i = 0; i < tiles.length; i += ctx.CONCURRENCY) {
+        const batch = tiles.slice(i, i + ctx.CONCURRENCY);
+        await Promise.all(batch.map(async tile => {
+            const buf = await utils.downloadFileWithRetry(`https://backend.wplace.live/files/s0/tiles/${tile.cx}/${tile.cy}.png`);
+            const img = new Image();
+            img.src = buf;
+            if (img.width && img.height) {
+                __ctx.drawImage(img, (tile.cx - tlx0) * 1000, (tile.cy - tly1) * 1000);
+            } else {
+                console.warn(`Tile ${tile.cx},${tile.cy} is empty`);
+            }
+        }));
+    }
+
+    await fs.mkdir('data/images/', { recursive: true });
+
+    const buffer = canvas.toBuffer('image/png');
+    await fs.writeFile(`data/images/${img_name}.png`, buffer);
+    console.log(`Image '${img_name}' was uploaded to directory 'data/images/'.`);
 }
