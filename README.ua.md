@@ -2,7 +2,12 @@
 
 __Wplace Snapshot Maker__ - Це локальний сервер на вашему ПК, який може робити знімки холста сайта `wplace.live`. Він працює як локальний сайт, де зв'язок відбувається через термінал, і користувач зобов'язаний вводити команди. Цей проект є незавершеним, тому йому потрібен час, щоб представити зручний інтерфейс і додаткові функції.
 
+<<<<<<< HEAD
 <img width="1918" height="937" alt="image" src="https://github.com/user-attachments/assets/a67e1bf9-aea7-4340-b648-fcf504a29120" />
+=======
+<img width="1918" height="937" alt="image" src="https://github.com/user-attachments/assets/673f48db-de8c-4ae7-8027-95adb273555d" />
+
+>>>>>>> 2b442e21d9b06db69555a100203a7c0e30a4afff
 
 ## Інші Мови
 - [Россійська](README.ru.md)
