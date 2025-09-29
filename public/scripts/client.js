@@ -29,11 +29,13 @@ if (savedState) {
     map.setView([0, 0], 0);
 }
 
-L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
-    attribution: 'Map data: © OpenStreetMap contributors, SRTM | Map style: © OpenTopoMap (CC-BY-SA)',
-    subdomains: 'abc',
-    maxZoom: 17
-}).addTo(map);
+if(settings.load_topographic) {
+    L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+        attribution: 'Map data: © OpenStreetMap contributors, SRTM | Map style: © OpenTopoMap (CC-BY-SA)',
+        subdomains: 'abc',
+        maxZoom: 17
+    }).addTo(map);
+}
 
 L.tileLayer('http://127.0.0.1:3000/tiles/{z}/{x}/{y}.png', {
     tileSize: 512,

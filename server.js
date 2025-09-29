@@ -1,58 +1,18 @@
 import express from 'express';
-import fs from 'fs/promises';
 import path from 'path';
-import axios from "axios";
+import fs from 'fs/promises';
 import PQueue from "p-queue";
 
 import { createCanvas, loadImage } from 'canvas';
 import { LRUCache } from 'lru-cache';
 
+import * as cmd from "./scripts/commands.js"
+import * as utils    from "./scripts/utils.js"
+
 import readline from 'readline';
 
-async function readJson(filePath, options = {}) {
-  try {
-    const data = await fs.readFile(filePath, "utf8");
-    return JSON.parse(data);
-  } catch (err) {
-    if (err.code === "ENOENT" && options.createIfAbsent) {
-      await fs.writeFile(filePath, JSON.stringify({}, null, 2), "utf8");
-    }
-    return {};
-  }
-}
-
-async function writeJson(filePath, obj) {
-  try {
-    const data = JSON.stringify(obj, null, 2);
-    await fs.writeFile(filePath, data, 'utf8');
-  } catch (err) {
-    console.error('Failed to write JSON:', err);
-  }
-}
-
-function pathToDate(p) {
-  const [year, month, day, hour, minute] = p.trim().split(/\/+/);
-  return new Date(month-1, day, year, hour, minute);
-}
-
-function pathToFormatted(p) {
-  const [year, month, day, hour, minute] = p.trim().split(/\/+/);
-  return `${month}/${day}/${year}-${hour}:${minute}`;
-}
-
-function dateToPath(d) {
-  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}/${String(d.getHours()).padStart(2,'0')}/${String(d.getMinutes()).padStart(2,'0')}`
-}
-
-function dateToFormatted(d) {
-  return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}-${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 const DEFAULT_SETTINGS = {
+  load_topographic: true,
   current_snapshot: "",
   current_date: "",
   cache_control: true,
@@ -65,7 +25,7 @@ const DEFAULT_SETTINGS = {
   min_zoom: 6
 };
 
-let settings = await readJson('settings.json')
+let settings = await utils.readJson('settings.json')
 
 if (!settings || typeof settings !== 'object') {
   settings = { ...DEFAULT_SETTINGS };
@@ -83,53 +43,61 @@ if (!settings || typeof settings !== 'object') {
   }
 }
 
-const CACHE_CONTROL = settings.cache_control;
-const CACHE_CONTROL_LIFETIME = settings.cache_control_lifetime;
+// Context of the program //
+class Context {
+  constructor() {
+    this.rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      prompt: '> '
+    });
 
-const TILE_CACHE = new LRUCache({
-  max: settings.tile_cache,
-});
-const CHUNK_IMAGE_CACHE = new LRUCache({
-  max: settings.chunk_image_cache
-});
+    this.TILE_CACHE        = new LRUCache({max: settings.tile_cache,});
+    this.CHUNK_IMAGE_CACHE = new LRUCache({max: settings.chunk_image_cache});
 
-const DOWNLOAD_COOLDOWN = settings.download_cooldown;
-const DOWNLOAD_LIMIT    = settings.download_limit;
+    this.CACHE_CONTROL = settings.cache_control;
+    this.CACHE_CONTROL_LIFETIME = settings.cache_control_lifetime;
+
+    this.DOWNLOAD_COOLDOWN = settings.download_cooldown;
+    this.DOWNLOAD_LIMIT    = settings.download_limit;
+
+    this.SNAPSHOT_PATH = settings.current_snapshot + '/' + settings.current_date;
+    this.SNAPSHOT_NAME = settings.current_snapshot;
+    this.AREA = [];
+  }  
+
+  ask(query) {
+    return new Promise(resolve => this.rl.question(query, resolve));
+  }
+
+  clearCache() {
+    this.TILE_CACHE.clear();
+    this.CHUNK_IMAGE_CACHE.clear();
+  }
+
+  async changeSnapshot(name, date) {
+    this.clearCache();
+
+    this.SNAPSHOT_PATH = name + '/' + date;
+    this.SNAPSHOT_NAME = name;
+
+    settings = await utils.readJson('settings.json');
+
+    settings.current_snapshot = name;
+    settings.current_date = date;
+    
+    await utils.writeJson("settings.json", settings);
+  }
+}
 
 const TILE_SIZE  = 1000;
 const CHUNK_SIZE = 1000;
 const NATIVE_ZOOM = 12;
 
+const context = new Context();
 const app = express();
 
-let SNAPSHOT_PATH = settings.current_snapshot + '/' + settings.current_date;
-let SNAPSHOT_NAME = settings.current_snapshot;
-let AREA = [];
-
-if(SNAPSHOT_NAME) console.log(`Current snapshot is ${settings.current_snapshot}[${pathToFormatted(settings.current_date)}]`)
-
-function clearCache() {
-  TILE_CACHE.clear();
-  CHUNK_IMAGE_CACHE.clear();
-}
-
-async function switchSnapshot(name, date) {
-  clearCache();
-    
-  SNAPSHOT_PATH = name + '/' + date;
-  SNAPSHOT_NAME = name;
-
-  settings = await readJson('settings.json');
-
-  settings.current_snapshot = name;
-  settings.current_date = date;
-  
-  writeJson("settings.json", settings);
-}
-
-function chunkPath(cx, cy) {
-  return path.resolve(`data/snapshots/${SNAPSHOT_PATH}/${cx}_${cy}.png`);
-}
+if(context.SNAPSHOT_NAME) console.log(`Current snapshot is ${settings.current_snapshot}[${utils.pathToFormatted(settings.current_date)}]`)
 
 function tileToPixel(z, x, y) {
   const scale = Math.pow(2, NATIVE_ZOOM - z);
@@ -172,10 +140,10 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
   const y = Number(req.params.y);
   const cacheKey = `${z}_${x}_${y}`;
 
-  const cached = TILE_CACHE.get(cacheKey);
+  const cached = context.TILE_CACHE.get(cacheKey);
   if (cached) {
     res.setHeader('Content-Type', 'image/png');
-    if (CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${CACHE_CONTROL_LIFETIME}`);
+    if (context.CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${context.CACHE_CONTROL_LIFETIME}`);
     return res.end(cached);
   }
 
@@ -198,7 +166,7 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
 
     for (let cx = cx0; cx <= cx1; cx++) {
         for (let cy = cy0; cy <= cy1; cy++) {
-          const p = chunkPath(cx, cy);
+          const p = path.resolve(`data/snapshots/${context.SNAPSHOT_PATH}/${cx}_${cy}.png`);
 
           try {
             await fs.access(p);
@@ -207,11 +175,11 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
           }
 
           const chunkKey = `${cx}_${cy}`;
-          let img = CHUNK_IMAGE_CACHE.get(chunkKey);
+          let img = context.CHUNK_IMAGE_CACHE.get(chunkKey);
           if (!img) {
             try {
               img = await loadImage(p);
-              CHUNK_IMAGE_CACHE.set(chunkKey, img);
+              context.CHUNK_IMAGE_CACHE.set(chunkKey, img);
             } catch (e) {
               continue;
             }
@@ -245,11 +213,11 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
       }
 
     const buf = canvas.toBuffer('image/png');
-    TILE_CACHE.set(cacheKey, buf);
+    context.TILE_CACHE.set(cacheKey, buf);
 
     if (!res.writableEnded) {
       res.setHeader('Content-Type', 'image/png');
-      if (CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${CACHE_CONTROL_LIFETIME}`);
+      if (context.CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${context.CACHE_CONTROL_LIFETIME}`);
       res.end(buf);
     }
   }, { priority: z*z });
@@ -258,161 +226,24 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
 app.post('/points', async (req, res) => {
   const { tileX0, tileY0, tileX1, tileY1 } = req.body;
 
-  AREA = normalizeCorners([tileX0, tileY0], [tileX1, tileY1]);
+  context.AREA = normalizeCorners([tileX0, tileY0], [tileX1, tileY1]);
 
   res.json({ status: "ok", received: req.body });
 }) 
 
 app.listen(settings.server_port, () => console.log(`Server on localhost:${settings.server_port}.`));
 
-async function folderExists(folderPath) {
-  try {
-    const stats = await fs.stat(folderPath);
-    return stats.isDirectory();
-  } catch (err) {
-    if (err.code === 'ENOENT') return false; 
-    throw err; 
-  }
+const commands = {
+  load:     cmd.handleLoad,
+  snapshot: cmd.handleSnapshot,
+  delete:   cmd.handleDelete,
+  current:  cmd.handleCurrent,
+  memory:   cmd.handleMemory,
+  show:     cmd.handleShow,
+  limit:    cmd.handleLimit
 }
 
-async function downloadFileWithRetry(url) {
-  try {
-    const res = await fetch(url);
-
-    if (res.status === 429) {
-      const retryAfter = res.headers.get("retry-after"); 
-      const wait = (retryAfter ? parseInt(retryAfter, 10) * 1000 : 5000); // мс
-      console.warn(`429 received. Retrying after ${wait}ms...`);
-      await sleep(wait);
-      return await downloadFileWithRetry(url);
-    }
-
-    if (!res.ok) {
-      throw new Error(`Failed with status ${res.status}`);
-    }
-
-    return Buffer.from(await res.arrayBuffer());
-  } catch (err) {
-    console.error("Download error:", err.message);
-    throw err;
-  }
-}
-
-async function getSnapshotChanges(snapshotName, flag = "") {
-  const snapshotPath = "data/snapshots/"+snapshotName;
-
-  const files = await fs.readdir(snapshotPath, { withFileTypes: true }); 
-  const years = files.filter(d => d.isDirectory()).map(d => d.name);
-  const dates = [];
-  
-  for (const year of years) {
-    const months = await fs.readdir(path.join(snapshotPath, year));
-    for (const month of months) {
-      const days = await fs.readdir(path.join(snapshotPath, year, month));
-      for (const day of days) {
-        const hours = await fs.readdir(path.join(snapshotPath, year, month, day));
-        for (const hour of hours) {
-          const minutes = await fs.readdir(path.join(snapshotPath, year, month, day, hour));
-          for (const minute of minutes) {
-            const d = new Date(year, month - 1, day, hour, minute);
-            dates.push(d);
-          }
-        }
-      }
-    }
-  }
-
-  if(flag == '-a' ) {         // ascend by date
-    dates.sort((a, b) => a - b);
-  } else if(flag == '-d') {   // descend by date
-    dates.sort((a, b) => b - a);
-  }
-  return dates;
-}
-
-async function getSnapshotSize(snapshotName, options = {saveMeta: true, preciseLoc: ""}) {
-  const meta = await readJson(`data/snapshots/${snapshotName}/metadata.json`)
-
-  if(options.preciseLoc) {
-    if(meta && options.preciseLoc in meta.memory_cache) {
-      return meta.memory_cache[folderPath];
-    }
-
-    const tiles = await fs.readdir(options.preciseLoc);
-    let snapshotSize = 0;
-
-    for (const tile of tiles) {
-      const stats = await fs.stat(path.join(options.preciseLoc, tile));
-      snapshotSize += stats.size;
-    }
-
-    if(options.saveMeta) meta.memory_cache[options.preciseLoc] = snapshotSize;
-    return snapshotSize;
-  }
-
-  const queue = [{ path: `data/snapshots/${snapshotName}`, depth: 0 }];
-  const resultFolders = [];
-
-  while (queue.length) {
-    const { path: currentPath, depth } = queue.shift();
-
-    if (depth === 5) {
-      resultFolders.push(currentPath);
-      continue;
-    }
-
-    try {
-      const entries = await fs.readdir(currentPath, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isDirectory()) {
-          queue.push({ path: path.join(currentPath, entry.name), depth: depth + 1 });
-        }
-      }
-    } catch (err) {
-      console.error('Error reading folder:', currentPath, err);
-    }
-  }
-  
-  let totalSize = 0;
-
-  for(const folderPath of resultFolders) {
-    if(meta && folderPath in meta.memory_cache) {
-      totalSize+=meta.memory_cache[folderPath];
-      continue;
-    }
-
-    const tiles = await fs.readdir(folderPath);
-    let snapshotSize = 0;
-
-    for (const tile of tiles) {
-      const stats = await fs.stat(path.join(folderPath, tile));
-      snapshotSize += stats.size;
-    }
-
-    if(options.saveMeta) meta.memory_cache[folderPath] = snapshotSize;
-
-    totalSize += snapshotSize;
-  }
-
-  await writeJson(`data/snapshots/${snapshotName}/metadata.json`, meta);
-
-  return totalSize;
-}
-
-
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-  prompt: '> '
-});
-
-function ask(rl, query) {
-  return new Promise(resolve => rl.question(query, resolve));
-}
-
-rl.prompt();
-
-rl.on('line', async (line) => {
+function parseInput(line) {
   const allArgs = line.trim().split(/\s+/);
 
   const params = [];
@@ -425,274 +256,36 @@ rl.on('line', async (line) => {
     return true;
   });
 
-  const flags = remainingArgs.filter(arg =>  arg.startsWith('-'));
+  const flags = remainingArgs.filter(arg => arg.startsWith('-'));
   const args  = remainingArgs.filter(arg => !arg.startsWith('-'));
-
   const command = args[0];
 
-  switch (command) {
+  return { command, args, flags, params };
+}
+
+context.rl.prompt();
+
+context.rl.on('line', async (line) => {
+  const input = parseInput(line);
+
+  switch (input.command) {
     case 'status':
       console.log('Server is working!');
       break;
     case 'exit':
       console.log('Closing...');
       process.exit(0);
-    case 'snapshot': {
-      let [ , name, tlx0, tly0, tlx1, tly1] = args;
-
-      if(!name) {
-        if(SNAPSHOT_NAME) {
-          name = SNAPSHOT_NAME;
-        } else {
-          console.log("Name is not defined.");
-          break;
-        }
-      } 
-
-      let meta = {};
-      if(await folderExists(`data/snapshots/${name}`)) {
-        meta = await readJson(`data/snapshots/${name}/metadata.json`, {createIfAbsent: true});
-      }
-
-      else {
-        meta = {
-          latest_date: "",
-          boundaries:  [],
-          limit: 0,
-          memory_cache: {}
-        }
-      }
-      
-      let limit = meta.limit;
-
-      const limitParam = params.find(p => p.key === 'limit');
-      if (limitParam) {
-        limit = Number(limitParam.value) * 1024 * 1024;
-      }
-    
-      if(!tlx0) {
-        if(AREA.length > 0) {
-          tlx0 = AREA[0][0];
-          tly0 = AREA[0][1];
-          tlx1 = AREA[1][0];
-          tly1 = AREA[1][1];
-        } else if(meta.boundaries) {
-          tlx0 = meta.boundaries[0];
-          tly0 = meta.boundaries[1];
-          tlx1 = meta.boundaries[2];
-          tly1 = meta.boundaries[3];
-        } else {
-          console.log("Points are not defined.")
-          break;
-        }
-      }
-
-      const now = new Date();
-
-      const folderPath = path.resolve(`data/snapshots/${name}/${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()}/${String(now.getHours()).padStart(2,'0')}/${String(now.getMinutes()).padStart(2,'0')}`);
-      await fs.mkdir(folderPath, { recursive: true });
-
-      const queue = [];
-
-      for (let y = tly0; y >= tly1; y--) {
-        for (let x = tlx0; x <= tlx1; x++) {
-          queue.push([x, y]);
-        }
-      }
-
-      let downloadSize = 0;
-      while (queue.length > 0) {
-        const batch = queue.splice(0, DOWNLOAD_LIMIT);
-        await Promise.all(batch.map(async ([x, y]) => {
-          try {
-            const tile_png = await downloadFileWithRetry(`https://backend.wplace.live/files/s0/tiles/${x}/${y}.png`);
-            downloadSize += tile_png.length;
-            const tilePath = path.join(folderPath, `${x}_${y}.png`);
-            await fs.writeFile(tilePath, tile_png);
-            console.log(`Saved tile: ${tilePath}`);
-          } catch (e) {
-            console.error(`Failed to load tile with tl X: ${x}, tl Y: ${y}:`, e.message);
-          }
-        }));
-        await sleep(DOWNLOAD_COOLDOWN);
-      }
-
-      if(limit != 0) {
-        const sizeBefore = await getSnapshotSize(name, {saveMeta: false});
-        let newSize    = sizeBefore + downloadSize;
-
-        if(newSize > limit) {
-          const changes = await getSnapshotChanges(name, '-a')
-          const deletePaths = [];
-          for(const change of changes) {
-            if(newSize > limit) {
-              const __path = `data/snapshots/${name}/${dateToPath(change)}`
-
-              newSize -= await getSnapshotSize(name, {saveMeta: false, preciseLoc: __path});
-              deletePaths.push(__path);
-            } else break;
-          }
-
-          const answer = await ask(rl, `You're going to delete ${deletePaths.length} change(s) of '${name}' to free disk space. Are you sure? Write y/n to confirm: `)
-          if(['y', 'yes'].includes(answer.trim().toLowerCase())) {
-            for(const deletePath of deletePaths) {
-              try {
-                await fs.rm(deletePath, { recursive: true, force: true });
-              } catch(e) {
-                console.log("Failed to delete changes.")
-              }
-            }
-          } else {
-            console.log("Tip: You can expand limit by command `limit <your limit in megabytes>`")
-          }
-        }
-        
-      }
-      console.log("All tiles saved successfully!");
-
-      meta.latest_date = `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()}/${String(now.getHours()).padStart(2,'0')}/${String(now.getMinutes()).padStart(2,'0')}`;
-      meta.boundaries  = [tlx0, tly0, tlx1, tly1];
-      meta.limit = limit;
-
-      await writeJson(`data/snapshots/${name}/metadata.json`, meta);
-
-      if(flags.includes('-s') || flags.includes('-switch')) {
-        await switchSnapshot(name, meta.latest_date);
-      }
-      break;
-    }
-    case 'update':
-      break;
-    case 'show': {
-      const [ , name, date] = args;
-
-      if(name) {
-        if(date) {
-          const [month, day, year, hour, minute] = date.trim().split(/[-/]+/).map(Number);
-        } else {
-          const dates = await getSnapshotChanges(name, flags[0]);
-          const formatted = dates.map(d => dateToFormatted(d));
-
-          console.log("Dates:", formatted);
-        }
-      } else {
-        try {
-          const files = await fs.readdir("data/snapshots", { withFileTypes: true });
-          const folders = files.filter(d => d.isDirectory()).map(d => d.name);
-          
-          console.log('Snapshots:', folders);
-        } catch (err) {
-          console.error('Failed to read snapshots:', err);
-        }
-      }
-
-      break;
-    }
-    case 'limit': {
-      const [, name, value] = args;
-      const meta = await readJson(`data/snapshots/${name}/metadata.json`)
-
-      meta.limit = value * 1024 * 1024;
-
-      await writeJson(`data/snapshots/${name}/metadata.json`, meta);
-
-      console.log(`'${name}' was limited.`)
-      break;
-    }
-    case 'schedule':
-      break;
-    case 'load': {
-      const [ , name, date] = args;
-
-      let chosen_date = ""; // format with slashes 
-
-      if (!name) {
-        if(!SNAPSHOT_NAME) name = SNAPSHOT_NAME;
-        else {
-          console.log("Name is not chosen.");
-          break;
-        }
-      }
-
-      if(!date && (flags.length == 0 || flags.includes('-latest'))) {
-        const meta = await readJson(`data/snapshots/${name}/metadata.json`);
-        if (!meta || !meta.latest_date) {
-          console.error('Metadata.json is empty or corrupted.');
-          break;
-        }
-        chosen_date = meta.latest_date
-      } else if (flags.includes('-next')) {
-        // 
-      } else if(date) {
-        const [month = 0, day = 0, year = 0, hour = 0, minute = 0] = (date || "").trim().split(/[-/:/]+/).map(Number);
-
-        const after = new Date(year, month-1, day, hour, minute)
-        const dates = await getSnapshotChanges(name);
-
-        const candidates = dates.filter(d => d >= after);
-
-        chosen_date = dateToPath(candidates[0]);
-      }
-
-      // Saves to settings 
-
-      await switchSnapshot(name, chosen_date);
-      console.log(`Snapshot was succefully loaded. The current snapshot is ${name}[${pathToFormatted(chosen_date)}].`)
-
-      break;
-    }
-    case 'memory': {
-      const [, name] = args;
-
-      if(name) {
-        const snapshotSize = await getSnapshotSize(name);
-        console.log(`${name} - ${(snapshotSize/(1024*1024)).toFixed(2)} mb`);
-      } else {
-        let total = 0;
-
-        const snapshots = await fs.readdir("data/snapshots", { withFileTypes: true });
-        for(const snapshot of snapshots) {
-          const snapshotSize = await getSnapshotSize(snapshot.name);
-          console.log(`${snapshot.name} - ${(snapshotSize/(1024*1024)).toFixed(2)} mb`);
-
-          total += snapshotSize;
-        }
-
-        console.log(`Total memory usage of the disk: ${(total/(1024*1024)).toFixed(2)} mb.`, );
-      }
-      break;
-    }
-    case 'current': {
-      console.log(SNAPSHOT_NAME, SNAPSHOT_PATH);
-    }
-    case 'delete':
-      const [ , name, date] = args;
-      if(name) {
-        try {
-          let path = ""
-          if(date) {
-            path = `data/snapshots/${name}/${date}`;
-          } else {
-            path = `data/snapshots/${name}`;
-          }
-          const stat = await fs.stat(path);
-          if(stat.isDirectory()) {
-            await fs.rm(path, { recursive: true, force: true });
-            console.log(`Snapshot was deleted.`);
-          }
-        } catch (err) {
-          if (err.code === "ENOENT") {
-            console.log("Snapshot not found");
-          } else {
-            console.error("Error while deleting:", err);
-          }
-        }
-      }
-      
-      break;
     default:
-      console.log(`Unknown Command: ${command}`);
+      if (commands[input.command]) {
+        try {
+          await commands[input.command](context, input);
+        } catch (err) {
+          console.error(`Error in command "${input.command}":`, err);
+        }
+      } else {
+        console.log(`Unknown command: ${input.command}`);
+      }
   }
 
-  rl.prompt();
+  context.rl.prompt();
 });

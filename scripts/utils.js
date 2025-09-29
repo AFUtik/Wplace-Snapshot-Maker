@@ -1,0 +1,86 @@
+import fs from 'fs/promises';
+import path from "path"
+
+// JSON //
+
+export async function folderExists(folderPath) {
+  try {
+    const stats = await fs.stat(folderPath);
+    return stats.isDirectory();
+  } catch (err) {
+    if (err.code === 'ENOENT') return false; 
+    throw err; 
+  }
+}
+
+export async function readJson(filePath, options = { default: {}, createIfAbsent: false }) {
+  try {
+    const data = await fs.readFile(filePath, "utf8");
+    const json = JSON.parse(data);
+
+    return Object.keys(json).length === 0 ? options.default : json;
+  } catch (err) {
+    if (err.code === "ENOENT" && options.createIfAbsent) {
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, JSON.stringify({}, null, 2), "utf8");
+    }
+    return options.default;
+  }
+}
+
+export async function writeJson(filePath, obj) {
+  try {
+    const data = JSON.stringify(obj, null, 2);
+    await fs.writeFile(filePath, data, 'utf8');
+  } catch (err) {
+    console.error('Failed to write JSON:', err);
+  }
+}
+
+export async function downloadFileWithRetry(url) {
+  try {
+    const res = await fetch(url);
+
+    if (res.status === 429) {
+      const retryAfter = res.headers.get("retry-after"); 
+      const wait = (retryAfter ? parseInt(retryAfter, 10) * 1000 : 5000); // мс
+      console.warn(`429 received. Retrying after ${wait}ms...`);
+      await sleep(wait);
+      return await downloadFileWithRetry(url);
+    }
+
+    if (!res.ok) {
+      throw new Error(`Failed with status ${res.status}`);
+    }
+
+    return Buffer.from(await res.arrayBuffer());
+  } catch (err) {
+    console.error("Download error:", err.message);
+    throw err;
+  }
+}
+
+
+// Dates //
+
+export function pathToDate(p) {
+  const [year, month, day, hour, minute] = p.trim().split(/\/+/);
+  return new Date(month-1, day, year, hour, minute);
+}
+
+export function pathToFormatted(p) {
+  const [year, month, day, hour, minute] = p.trim().split(/\/+/);
+  return `${month}/${day}/${year}-${hour}:${minute}`;
+}
+
+export function dateToPath(d) {
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}/${String(d.getHours()).padStart(2,'0')}/${String(d.getMinutes()).padStart(2,'0')}`
+}
+
+export function dateToFormatted(d) {
+  return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}-${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`
+}
+
+// other //
+
+export function sleep(ms) {return new Promise(resolve => setTimeout(resolve, ms));}
