@@ -4,10 +4,6 @@ __Wplace Snapshot Maker__ - This is a local server on your PC that can take snap
 
 <img width="1918" height="937" alt="image" src="https://github.com/user-attachments/assets/a67e1bf9-aea7-4340-b648-fcf504a29120" />
 
-<<<<<<< HEAD
-=======
-
->>>>>>> 2b442e21d9b06db69555a100203a7c0e30a4afff
 ## Other Languages
 - [Ukranian](README.ua.md)
 - [Russian](README.md)
