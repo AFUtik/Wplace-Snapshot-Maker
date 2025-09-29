@@ -2,6 +2,9 @@
 
 __Wplace Snapshot Maker__ - This is a local server on your PC that can take snapshots of the canvas site `wplace.live`. It works as a local site where communication takes place through a terminal, and the user is obliged to enter commands. This project is unfinished, so it needs time to introduce a user-friendly interface and additional features.
 
+<img width="1918" height="937" alt="image" src="https://github.com/user-attachments/assets/a67e1bf9-aea7-4340-b648-fcf504a29120" />
+
+
 ## Other Languages
 - [Ukranian](README.ua.md)
 - [Russian](README.md)
