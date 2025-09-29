@@ -29,7 +29,7 @@ let settings = await utils.readJson('settings.json')
 
 if (!settings || typeof settings !== 'object') {
   settings = { ...DEFAULT_SETTINGS };
-  await writeJson('settings.json', settings); 
+  await utils.writeJson('settings.json', settings); 
 } else {
   let changed = false;
   for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
@@ -39,7 +39,7 @@ if (!settings || typeof settings !== 'object') {
     }
   }
   if (changed) {
-    await writeJson('settings.json', settings);
+    await utils.writeJson('settings.json', settings);
   }
 }
 
