@@ -100,6 +100,11 @@ export async function handleLoad(ctx: Context, input: {[key: string]: any}) {
     let [, name, date] = input.args as [string, string, string]; 
 
     const snapshot: Snapshot = new Snapshot(name, date);
+    if(!await utils.folderExists(snapshot.fullPath)) {
+        console.log("Snapshot not found.")
+        return;
+    }
+
     await snapshot.fetchMeta();
 
     if (!name) {
