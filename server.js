@@ -93,7 +93,7 @@ app.get("/settings.json", async (req, res) => {
 app.get('/origin', async (req, res) => {
     const x = (context.AREA[0][0] + context.AREA[1][0]) / 2;
     const y = (context.AREA[0][1] + context.AREA[1][1]) / 2;
-
+    
     res.json({ x, y });
 });
 
