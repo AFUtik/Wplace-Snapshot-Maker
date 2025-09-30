@@ -104,7 +104,6 @@ export async function handleLoad(ctx: Context, input: {[key: string]: any}) {
         console.log("Snapshot not found.")
         return;
     }
-
     await snapshot.fetchMeta();
 
     if (!name) {
@@ -230,7 +229,7 @@ export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}
     console.log("All tiles saved successfully!");
 
     meta.latest_date = snapshot.date;
-    meta.boundaries = [tlx0, tly0, tlx1, tly1];
+    meta.boundaries = [[tlx0, tly0], [tlx1, tly1]];
     meta.limit = limit;
 
     await utils.writeJson(`data/snapshots/${name}/metadata.json`, meta);

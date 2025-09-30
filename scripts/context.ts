@@ -99,7 +99,7 @@ export class Context {
         this.DOWNLOAD_COOLDOWN = settings.download_cooldown;
         this.DOWNLOAD_LIMIT = settings.download_limit;
 
-        this.SNAPSHOT_PATH = settings.current_snapshot + '/' + settings.current_date;
+        this.SNAPSHOT_PATH = 'data/snapshots/' + settings.current_snapshot + '/' + settings.current_date;
         this.SNAPSHOT_NAME = settings.current_snapshot;
 
         this.AREA = settings.selection;
