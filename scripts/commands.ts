@@ -3,33 +3,25 @@ import fs from 'fs/promises';
 import path from "path";
 
 import { createCanvas, Image } from 'canvas';
-
-const DEFAULT_META = {
-    latest_date: "",
-    boundaries: [],
-    limit: 0,
-    memory_cache: {}
-};
+import { SNAPSHOTS_DIR, Snapshot, Context } from './context.ts';
 
 // operations with snapshot //
 
-async function getSnapshotChanges(snapshotName, flag = "") {
-  const snapshotPath = "data/snapshots/"+snapshotName;
-
-  const files = await fs.readdir(snapshotPath, { withFileTypes: true }); 
-  const years = files.filter(d => d.isDirectory()).map(d => d.name);
-  const dates = [];
+async function getSnapshotChanges(snapshot: Snapshot, flag: string = ""): Promise<any[]> {
+  const files = await fs.readdir(snapshot.rootPath, { withFileTypes: true }); 
+  const years: string[] = files.filter(d => d.isDirectory()).map(d => d.name);
+  const dates: any[] = [];
   
   for (const year of years) {
-    const months = await fs.readdir(path.join(snapshotPath, year));
+    const months = await fs.readdir(path.join(snapshot.rootPath, year));
     for (const month of months) {
-      const days = await fs.readdir(path.join(snapshotPath, year, month));
+      const days = await fs.readdir(path.join(snapshot.rootPath, year, month));
       for (const day of days) {
-        const hours = await fs.readdir(path.join(snapshotPath, year, month, day));
+        const hours = await fs.readdir(path.join(snapshot.rootPath, year, month, day));
         for (const hour of hours) {
-          const minutes = await fs.readdir(path.join(snapshotPath, year, month, day, hour));
+          const minutes = await fs.readdir(path.join(snapshot.rootPath, year, month, day, hour));
           for (const minute of minutes) {
-            const d = new Date(year, month - 1, day, hour, minute);
+            const d = new Date(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute));
             dates.push(d);
           }
         }
@@ -45,14 +37,19 @@ async function getSnapshotChanges(snapshotName, flag = "") {
   return dates;
 }
 
-async function getSnapshotSize(snapshotName, options = {metaIn: null, date: ""}) {
-  const meta = await utils.readJson(`data/snapshots/${snapshotName}/metadata.json`, {default: DEFAULT_META, createIfAbsent: true});
+interface GetSnapshotSizeOptions {
+  metaIn?: any | null;
+  date?: string;
+}
 
-  const queue = [{ path: `data/snapshots/${snapshotName}/${options.date}`, depth: 0 }];
-  const resultFolders = [];
+async function getSnapshotSize(snapshot: Snapshot, options: GetSnapshotSizeOptions = {date: "", metaIn: null}) : Promise<number> {
+  const meta = await snapshot.readMeta();
+
+  const queue: {path: string, depth: number}[] = [{ path: `${SNAPSHOTS_DIR}/${snapshot.name}/${options.date}`, depth: 0 }];
+  const resultFolders: string[] = [];
 
   while (queue.length) {
-    const { path: currentPath, depth } = queue.shift();
+    const { path: currentPath, depth } = queue.shift()!;
 
     if (depth === 5) {
       resultFolders.push(currentPath);
@@ -92,17 +89,18 @@ async function getSnapshotSize(snapshotName, options = {metaIn: null, date: ""})
     totalSize += snapshotSize;
   }
 
-  if(!options.metaIn) await utils.writeJson(`data/snapshots/${snapshotName}/metadata.json`, meta);
+  if(!options.metaIn) await snapshot.writeMeta(meta);
 
   return totalSize;
 }
 
 // Commands //
 
-export async function handleLoad(ctx, input) {
-    const [, name, date] = input.args;
+export async function handleLoad(ctx: Context, input: {[key: string]: any}) {
+    let [, name, date] = input.args as [string, string, string]; 
 
-    let chosen_date = ""; // format with slashes 
+    const snapshot: Snapshot = new Snapshot(name, date);
+    await snapshot.fetchMeta();
 
     if (!name) {
         if (!ctx.SNAPSHOT_NAME) name = ctx.SNAPSHOT_NAME;
@@ -112,31 +110,24 @@ export async function handleLoad(ctx, input) {
         }
     }
 
-    if (!date && (input.flags.length == 0 || input.flags.includes('-latest'))) {
-        const meta = await utils.readJson(`data/snapshots/${name}/metadata.json`);
-        if (!meta || !meta.latest_date) {
-            console.error('Metadata.json is empty or corrupted.');
-            return;
-        }
-        chosen_date = meta.latest_date
-    }else if (date) {
+    if (date) {
         const [month = 0, day = 0, year = 0, hour = 0, minute = 0] = (date || "").trim().split(/[-/:/]+/).map(Number);
 
-        const after = new Date(year, month - 1, day, hour, minute)
-        const dates = await getSnapshotChanges(name);
+        const after = new Date(year, month - 1, day, hour, minute);
+        const dates = await getSnapshotChanges(snapshot);
 
         const candidates = dates.filter(d => d >= after);
 
-        chosen_date = utils.dateToPath(candidates[0]);
+        snapshot.setDate(candidates[0]);
     }
 
     // Saves to settings 
 
-    await ctx.changeSnapshot(name, chosen_date);
-    console.log(`Snapshot was succefully loaded. The current snapshot is ${name}[${utils.pathToFormatted(chosen_date)}].`)
+    await ctx.changeSnapshot(snapshot);
+    console.log(`Snapshot was succefully loaded. The current snapshot is ${name}[${utils.pathToFormatted(snapshot.date)}].`)
 }
 
-export async function handleSnapshot(ctx, input) {
+export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}) {
     let [, name, tlx0, tly0, tlx1, tly1] = input.args;
 
     if (!name) {
@@ -148,7 +139,11 @@ export async function handleSnapshot(ctx, input) {
         }
     }
 
-    const meta = await utils.readJson(`data/snapshots/${name}/metadata.json`, { default: DEFAULT_META, createIfAbsent: true });
+    const snapshot: Snapshot = new Snapshot(name);
+    const meta = await snapshot.readMeta();
+
+    await snapshot.setDateNow();
+    await fs.mkdir(snapshot.fullPath, {recursive: true});
 
     let limit = meta.limit;
 
@@ -163,21 +158,13 @@ export async function handleSnapshot(ctx, input) {
             tly0 = ctx.AREA[0][1];
             tlx1 = ctx.AREA[1][0];
             tly1 = ctx.AREA[1][1];
-        } else if (meta.boundaries) {
-            tlx0 = meta.boundaries[0];
-            tly0 = meta.boundaries[1];
-            tlx1 = meta.boundaries[2];
-            tly1 = meta.boundaries[3];
-        } else {
+
+            snapshot.boundaries = ctx.AREA;
+        }else {
             console.log("Points are not defined.")
             return;
         }
-    }
-
-    const now = new Date();
-
-    const folderPath = path.resolve(`data/snapshots/${name}/${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()}/${String(now.getHours()).padStart(2, '0')}/${String(now.getMinutes()).padStart(2, '0')}`);
-    await fs.mkdir(folderPath, { recursive: true });
+    }    
 
     const queue = [];
 
@@ -194,10 +181,10 @@ export async function handleSnapshot(ctx, input) {
             try {
                 const tile_png = await utils.downloadFileWithRetry(`https://backend.wplace.live/files/s0/tiles/${x}/${y}.png`);
                 downloadSize += tile_png.length;
-                const tilePath = path.join(folderPath, `${x}_${y}.png`);
+                const tilePath = path.join(snapshot.fullPath, `${x}_${y}.png`);
                 await fs.writeFile(tilePath, tile_png);
                 console.log(`Saved tile: ${tilePath}`);
-            } catch (e) {
+            } catch (e: any) {
                 console.error(`Failed to load tile with tl X: ${x}, tl Y: ${y}:`, e.message);
             }
         }));
@@ -205,7 +192,7 @@ export async function handleSnapshot(ctx, input) {
     }
 
     if (limit != 0) {
-        const sizeBefore = await getSnapshotSize(name, { metaIn: meta });
+        const sizeBefore = await getSnapshotSize(snapshot);
         let newSize = sizeBefore + downloadSize;
 
         if (newSize > limit) {
@@ -213,14 +200,14 @@ export async function handleSnapshot(ctx, input) {
             const deletePaths = [];
             for (const change of changes) {
                 if (newSize > limit) {
-                    const __path = `data/snapshots/${name}/${dateToPath(change)}`
+                    const __path = `data/snapshots/${name}/${utils.dateToPath(change)}`
 
-                    newSize -= await getSnapshotSize(name, { metaIn: meta, date: dateToPath(change) });
+                    newSize -= await getSnapshotSize(name, { metaIn: meta, date: utils.dateToPath(change) });
                     deletePaths.push(__path);
                 } else break;
             }
 
-            const answer = await ctx.ask(`You're going to delete ${deletePaths.length} change(s) of '${name}' to free disk space. Are you sure? Write y/n to confirm: `)
+            const answer: string = await ctx.ask(`You're going to delete ${deletePaths.length} change(s) of '${name}' to free disk space. Are you sure? Write y/n to confirm: `)
             if (['y', 'yes'].includes(answer.trim().toLowerCase())) {
                 for (const deletePath of deletePaths) {
                     try {
@@ -237,18 +224,18 @@ export async function handleSnapshot(ctx, input) {
     }
     console.log("All tiles saved successfully!");
 
-    meta.latest_date = `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()}/${String(now.getHours()).padStart(2, '0')}/${String(now.getMinutes()).padStart(2, '0')}`;
+    meta.latest_date = snapshot.date;
     meta.boundaries = [tlx0, tly0, tlx1, tly1];
     meta.limit = limit;
 
     await utils.writeJson(`data/snapshots/${name}/metadata.json`, meta);
 
     if (input.flags.includes('-s') || input.flags.includes('-switch')) {
-        await ctx.changeSnapshot(name, meta.latest_date);
+        await ctx.changeSnapshot(snapshot);
     }
 }
 
-export async function handleDelete(ctx, input) {
+export async function handleDelete(ctx: Context, input: {[key: string]: any}) {
     const [, name, date] = input.args;
     if (name) {
         try {
@@ -263,7 +250,7 @@ export async function handleDelete(ctx, input) {
                 await fs.rm(path, { recursive: true, force: true });
                 console.log(`Snapshot was deleted.`);
             }
-        } catch (err) {
+        } catch (err: any) {
             if (err.code === "ENOENT") {
                 console.log("Snapshot not found");
             } else {
@@ -273,18 +260,19 @@ export async function handleDelete(ctx, input) {
     }
 }
 
-export async function handleMemory(ctx, input) {
-    const [, name] = input.args;
+export async function handleMemory(ctx: Context, input: {[key: string]: any}) {
+    const [, name] = input.args as [string, string];
+    const snapshot: Snapshot = new Snapshot(name);
 
     if (name) {
-        const snapshotSize = await getSnapshotSize(name);
+        const snapshotSize = await getSnapshotSize(snapshot);
         console.log(`${name} - ${(snapshotSize / (1024 * 1024)).toFixed(2)} mb`);
     } else {
         let total = 0;
 
         const snapshots = await fs.readdir("data/snapshots", { withFileTypes: true });
-        for (const snapshot of snapshots) {
-            const snapshotSize = await getSnapshotSize(snapshot.name);
+        for (const snapshot_folder of snapshots) {
+            const snapshotSize = await getSnapshotSize(new Snapshot(snapshot_folder.name));
             console.log(`${snapshot.name} - ${(snapshotSize / (1024 * 1024)).toFixed(2)} mb`);
 
             total += snapshotSize;
@@ -294,18 +282,19 @@ export async function handleMemory(ctx, input) {
     }
 }
 
-export async function handleCurrent(ctx, input) {
+export async function handleCurrent(ctx: Context, input: {[key: string]: any}) {
     console.log(ctx.SNAPSHOT_NAME, ctx.SNAPSHOT_PATH);
 }
 
-export async function handleShow(ctx, input) {
-    const [, name, date] = input.args;
+export async function handleShow(ctx: Context, input: {[key: string]: any}) {
+    const [, name, date = ""] = input.args;
+    const snapshot: Snapshot = new Snapshot(name, date)
 
     if (name) {
         if (date) {
             const [month, day, year, hour, minute] = date.trim().split(/[-/]+/).map(Number);
         } else {
-            const dates = await getSnapshotChanges(name, input.flags[0]);
+            const dates = await getSnapshotChanges(snapshot, input.flags[0]);
             const formatted = dates.map(d => utils.dateToFormatted(d));
 
             console.log("Dates:", formatted);
@@ -322,7 +311,7 @@ export async function handleShow(ctx, input) {
     }
 }
 
-export async function handleLimit(ctx, input) {
+export async function handleLimit(ctx: Context, input: {[key: string]: any}) {
     const [, name, value] = input.args;
     const meta = await utils.readJson(`data/snapshots/${name}/metadata.json`)
 
@@ -333,7 +322,7 @@ export async function handleLimit(ctx, input) {
     console.log(`'${name}' was limited.`)
 }
 
-export async function handleImage(ctx, input) {
+export async function handleImage(ctx: Context, input: {[key: string]: any}) {
     const [, img_name] = input.args;
 
     const tlx0 = ctx.AREA[0][0];
@@ -372,4 +361,55 @@ export async function handleImage(ctx, input) {
     const buffer = canvas.toBuffer('image/png');
     await fs.writeFile(`data/images/${img_name}.png`, buffer);
     console.log(`Image '${img_name}' was uploaded to directory 'data/images/'.`);
+}
+
+export async function handleSchedule(ctx: Context, input: {[key: string]: any}) {
+    const [, name, time] = input.args;
+    if(input.flags.includes('-enable')) {
+        if(!time) {
+            console.log('Time is missing.')
+            return;
+        }
+
+        const timeFormat = time.replace(/\d/g, "");
+        const timeNumber = Number(time.replace(/\D/g, ""));
+        let ms = 0;
+        switch(timeFormat) {
+            case('ms'): {
+                ms = timeNumber;
+                break;
+            }
+            case('s'): {
+                ms = timeNumber*1000;
+                break;
+            }
+            case('m'): {
+                ms = timeNumber*1000000;
+                break;
+            }
+            case('h'): {
+                ms = timeNumber*1000000000;
+                break;
+            }
+            default: {
+                ms = timeNumber;
+            }
+        }
+        const intervalId = setInterval(async () => {
+            await handleSnapshot(ctx, {
+                args: ['snapshot', name],
+                params: [],
+                flags: []
+            });
+        }, ms); 
+        ctx.intervals[name] = intervalId;
+    } else if(input.flags.includes('-disable')) {
+        if(name in ctx.intervals) {
+            clearInterval(ctx.intervals[name]);
+            console.log("Interval was cleared.")
+        } else {
+            console.log("Interval not found.");
+        }
+    }
+    
 }

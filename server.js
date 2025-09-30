@@ -4,12 +4,11 @@ import fs from 'fs/promises';
 import PQueue from "p-queue";
 
 import { createCanvas, loadImage } from 'canvas';
-import { LRUCache } from 'lru-cache';
 
-import * as cmd from "./scripts/commands.js"
-import * as utils    from "./scripts/utils.js"
+import * as cmd from "./scripts/commands.ts"
+import {Context} from "./scripts/context.ts"
 
-import readline from 'readline';
+import * as utils from "./scripts/utils.js"
 
 const DEFAULT_SETTINGS = {
   load_topographic: true,
@@ -21,6 +20,7 @@ const DEFAULT_SETTINGS = {
   chunk_image_cache: 200,
   download_cooldown: 1000,
   download_limit: 5,
+  server_ip: "localhost",
   server_port: 3000,
   min_zoom: 6,
   concurrency: 4
@@ -30,7 +30,7 @@ let settings = await utils.readJson('settings.json')
 
 if (!settings || typeof settings !== 'object') {
   settings = { ...DEFAULT_SETTINGS };
-  await utils.writeJson('settings.json', settings); 
+  await utils.writeJson('settings.json', settings);
 } else {
   let changed = false;
   for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
@@ -44,61 +44,16 @@ if (!settings || typeof settings !== 'object') {
   }
 }
 
+const app = express();
+app.listen(settings.server_port, settings.server_ip, () => console.log(`Server on ${settings.server_ip}:${settings.server_port}.`));
+
 // Context of the program //
-class Context {
-  constructor() {
-    this.rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      prompt: '> '
-    });
 
-    this.CONCURRENCY = settings.concurrency;
-
-    this.TILE_CACHE        = new LRUCache({max: settings.tile_cache,});
-    this.CHUNK_IMAGE_CACHE = new LRUCache({max: settings.chunk_image_cache});
-
-    this.CACHE_CONTROL = settings.cache_control;
-    this.CACHE_CONTROL_LIFETIME = settings.cache_control_lifetime;
-
-    this.DOWNLOAD_COOLDOWN = settings.download_cooldown;
-    this.DOWNLOAD_LIMIT    = settings.download_limit;
-
-    this.SNAPSHOT_PATH = settings.current_snapshot + '/' + settings.current_date;
-    this.SNAPSHOT_NAME = settings.current_snapshot;
-    this.AREA = [];
-  }  
-
-  ask(query) {
-    return new Promise(resolve => this.rl.question(query, resolve));
-  }
-
-  clearCache() {
-    this.TILE_CACHE.clear();
-    this.CHUNK_IMAGE_CACHE.clear();
-  }
-
-  async changeSnapshot(name, date) {
-    this.clearCache();
-
-    this.SNAPSHOT_PATH = name + '/' + date;
-    this.SNAPSHOT_NAME = name;
-
-    settings = await utils.readJson('settings.json');
-
-    settings.current_snapshot = name;
-    settings.current_date = date;
-    
-    await utils.writeJson("settings.json", settings);
-  }
-}
-
-const TILE_SIZE  = 1000;
+const TILE_SIZE = 1000;
 const CHUNK_SIZE = 1000;
 const NATIVE_ZOOM = 12;
 
-const context = new Context();
-const app = express();
+const context = new Context(settings);
 
 if(context.SNAPSHOT_NAME) console.log(`Current snapshot is ${settings.current_snapshot}[${utils.pathToFormatted(settings.current_date)}]`)
 
@@ -135,7 +90,14 @@ app.get("/settings.json", async (req, res) => {
   }
 });
 
-const renderQueue = new PQueue({concurrency: context.CONCURRENCY});
+app.get('/origin', async (req, res) => {
+    const x = (context.AREA[0][0] + context.AREA[1][0]) / 2;
+    const y = (context.AREA[0][1] + context.AREA[1][1]) / 2;
+
+    res.json({ x, y });
+});
+
+const renderQueue = new PQueue({ concurrency: context.CONCURRENCY });
 
 app.get('/tiles/:z/:x/:y.png', async (req, res) => {
   const z = Number(req.params.z);
@@ -159,61 +121,56 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
 
     const { px, py, scale } = tileToPixel(z, x, y);
 
-    const tileWorldWidth  = Math.round(TILE_SIZE * scale);
+    const tileWorldWidth = Math.round(TILE_SIZE * scale);
     const tileWorldHeight = Math.round(TILE_SIZE * scale);
 
     const cx0 = Math.floor(px / CHUNK_SIZE);
     const cy0 = Math.floor(py / CHUNK_SIZE);
     const cx1 = Math.floor((px + tileWorldWidth - 1) / CHUNK_SIZE);
     const cy1 = Math.floor((py + tileWorldHeight - 1) / CHUNK_SIZE);
-
     for (let cx = cx0; cx <= cx1; cx++) {
-        for (let cy = cy0; cy <= cy1; cy++) {
-          const p = path.resolve(`data/snapshots/${context.SNAPSHOT_PATH}/${cx}_${cy}.png`);
-
+      for (let cy = cy0; cy <= cy1; cy++) {
+        const chunkKey = `${cx}_${cy}`;
+        let img_buf = context.IMAGE_BUFFER_CACHE.get(chunkKey);
+        if (!img_buf) {
           try {
+            const p = `data/snapshots/${context.SNAPSHOT_PATH}/${cx}_${cy}.png`;
             await fs.access(p);
-          } catch {
+
+            img_buf = await fs.readFile(p);
+            context.IMAGE_BUFFER_CACHE.set(chunkKey, img_buf);
+          } catch (e) {
             continue;
           }
+        }
+        const img = await loadImage(img_buf);
 
-          const chunkKey = `${cx}_${cy}`;
-          let img = context.CHUNK_IMAGE_CACHE.get(chunkKey);
-          if (!img) {
-            try {
-              img = await loadImage(p);
-              context.CHUNK_IMAGE_CACHE.set(chunkKey, img);
-            } catch (e) {
-              continue;
-            }
-          }
+        const chunkPx = cx * CHUNK_SIZE;
+        const chunkPy = cy * CHUNK_SIZE;
 
-          const chunkPx = cx * CHUNK_SIZE;
-          const chunkPy = cy * CHUNK_SIZE;
+        const sx = Math.max(0, px - chunkPx);
+        const sy = Math.max(0, py - chunkPy);
+        const ex = Math.min(CHUNK_SIZE, px + tileWorldWidth - chunkPx);
+        const ey = Math.min(CHUNK_SIZE, py + tileWorldHeight - chunkPy);
+        const sWidth = ex - sx;
+        const sHeight = ey - sy;
+        if (sWidth <= 0 || sHeight <= 0) continue;
 
-          const sx = Math.max(0, px - chunkPx);
-          const sy = Math.max(0, py - chunkPy);
-          const ex = Math.min(CHUNK_SIZE, px + tileWorldWidth - chunkPx);
-          const ey = Math.min(CHUNK_SIZE, py + tileWorldHeight - chunkPy);
-          const sWidth = ex - sx;
-          const sHeight = ey - sy;
-          if (sWidth <= 0 || sHeight <= 0) continue;
+        const dstOffsetX_world = chunkPx + sx - px;
+        const dstOffsetY_world = chunkPy + sy - py;
 
-          const dstOffsetX_world = chunkPx + sx - px;
-          const dstOffsetY_world = chunkPy + sy - py;
+        const dx = Math.round(dstOffsetX_world / scale);
+        const dy = Math.round(dstOffsetY_world / scale);
+        const dw = Math.round(sWidth / scale);
+        const dh = Math.round(sHeight / scale);
 
-          const dx = Math.round(dstOffsetX_world / scale);
-          const dy = Math.round(dstOffsetY_world / scale);
-          const dw = Math.round(sWidth / scale);
-          const dh = Math.round(sHeight / scale);
-
-          try {
-            ctx.drawImage(img, sx, sy, sWidth, sHeight, dx, dy, dw, dh);
-          } catch (e) {
-            console.error('drawImage error', e);
-          }
+        try {
+          ctx.drawImage(img, sx, sy, sWidth, sHeight, dx, dy, dw, dh);
+        } catch (e) {
+          console.error('drawImage error', e);
         }
       }
+    }
 
     const buf = canvas.toBuffer('image/png');
     context.TILE_CACHE.set(cacheKey, buf);
@@ -223,7 +180,8 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
       if (context.CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${context.CACHE_CONTROL_LIFETIME}`);
       res.end(buf);
     }
-  }, { priority: z*z });
+
+  }, { priority: 12 - z });
 });
 
 app.post('/points', async (req, res) => {
@@ -232,19 +190,18 @@ app.post('/points', async (req, res) => {
   context.AREA = normalizeCorners([tileX0, tileY0], [tileX1, tileY1]);
 
   res.json({ status: "ok", received: req.body });
-}) 
-
-app.listen(settings.server_port, () => console.log(`Server on localhost:${settings.server_port}.`));
+})
 
 const commands = {
-  load:     cmd.handleLoad,
+  load: cmd.handleLoad,
   snapshot: cmd.handleSnapshot,
-  delete:   cmd.handleDelete,
-  current:  cmd.handleCurrent,
-  memory:   cmd.handleMemory,
-  show:     cmd.handleShow,
-  limit:    cmd.handleLimit,
-  image:    cmd.handleImage
+  delete: cmd.handleDelete,
+  current: cmd.handleCurrent,
+  memory: cmd.handleMemory,
+  show: cmd.handleShow,
+  limit: cmd.handleLimit,
+  image: cmd.handleImage,
+  schedule: cmd.handleSchedule
 }
 
 function parseInput(line) {
@@ -261,7 +218,7 @@ function parseInput(line) {
   });
 
   const flags = remainingArgs.filter(arg => arg.startsWith('-'));
-  const args  = remainingArgs.filter(arg => !arg.startsWith('-'));
+  const args = remainingArgs.filter(arg => !arg.startsWith('-'));
   const command = args[0];
 
   return { command, args, flags, params };

@@ -77,3 +77,28 @@
 .github-btn:hover svg path {
   fill: #181717;
 }
+
+.origin-btn {
+  position: absolute;
+  top: 20px;
+  left: 55px;
+
+  color: #000000;
+  font-size: 17px;
+  background-color: #ffffff;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+  cursor: pointer;
+  padding: 10px;
+
+  box-shadow: 0 4px 0 rgba(0, 0, 0, 0.1);
+  transition: all 0.1s ease;
+  z-index: 100;
+
+  outline: none;
+}
+
+.origin-btn:active {
+  transform: translateY(2px);
+  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.1);
+}

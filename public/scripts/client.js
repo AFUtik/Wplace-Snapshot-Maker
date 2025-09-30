@@ -1,4 +1,3 @@
-// Функция для загрузки JSON настроек
 async function loadSettings() {
     try {
         const res = await fetch("/settings.json");
@@ -38,7 +37,7 @@ async function initMap() {
         }).addTo(map);
     }
 
-    L.tileLayer('http://127.0.0.1:3000/tiles/{z}/{x}/{y}.png', {
+    L.tileLayer(`http://${settings.server_ip}:${settings.server_port}/tiles/{z}/{x}/{y}.png`, {
         tileSize: 512,
         maxNativeZoom: 12,
         maxZoom: 16,
@@ -93,6 +92,23 @@ async function initMap() {
                 .catch(err => console.error("Error:", err));
         }
     });
+
+    return map;
 }
 
-initMap();
+let map;
+initMap().then(m => map = m);
+
+const btn = document.querySelector(".origin-btn");
+btn.addEventListener("click", async () => {
+    if (!map) return;
+
+    try {
+        const response = await fetch("/origin");
+        const origin = await response.json();
+
+        map.flyTo(map.unproject([origin.x, origin.y], 3), 14, { animate: true, duration: 2 });
+    } catch (err) {
+        console.error("Error while query:", err);
+    }
+});
