@@ -46,6 +46,12 @@ load example1 09/26/2025-15:45
 ```
 ___
 ```
+# Uploads a bunch of tiles and convert them into one image. (by default downloads to 'data/images/')
+# Region of the upload can be selected on the site or specified manually.
+image some_img
+```
+___
+```
 # Show all created snapshots
 show
 
