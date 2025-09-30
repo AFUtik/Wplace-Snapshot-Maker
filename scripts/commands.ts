@@ -273,7 +273,7 @@ export async function handleMemory(ctx: Context, input: {[key: string]: any}) {
         const snapshots = await fs.readdir("data/snapshots", { withFileTypes: true });
         for (const snapshot_folder of snapshots) {
             const snapshotSize = await getSnapshotSize(new Snapshot(snapshot_folder.name));
-            console.log(`${snapshot.name} - ${(snapshotSize / (1024 * 1024)).toFixed(2)} mb`);
+            console.log(`${snapshot_folder.name} - ${(snapshotSize / (1024 * 1024)).toFixed(2)} mb`);
 
             total += snapshotSize;
         }
