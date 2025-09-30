@@ -134,7 +134,7 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
         let img_buf = context.IMAGE_BUFFER_CACHE.get(chunkKey);
         if (!img_buf) {
           try {
-            const p = `data/snapshots/${context.SNAPSHOT_PATH}/${cx}_${cy}.png`;
+            const p = `${context.SNAPSHOT_PATH}/${cx}_${cy}.png`;
             await fs.access(p);
 
             img_buf = await fs.readFile(p);
