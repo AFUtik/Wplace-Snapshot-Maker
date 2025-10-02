@@ -21,6 +21,34 @@
 
   <button class="button origin-btn">Origin</button>
 
+  <div style="position:absolute; padding-top: 10px; padding-bottom: 12px; top:15px; left:140px; z-index:2;">
+    <span style="background-color: gray; font-family: 'Courier New', Courier, monospace;">Selection:</span><br>
+    <select id="selectionSelect">
+      <option value="1">Rectangle</option>
+      <option value="2">Polygon</option>
+    </select>
+  </div>
+
+  <div style="position:absolute; padding-top: 10px; padding-bottom: 12px; top:15px; left:250px; z-index:2;">
+    <span style="background-color: gray; font-family: 'Courier New', Courier, monospace;">Snapshot:</span><br>
+    <select id="snapshotSelect">
+      <option>Loading...</option>
+    </select>
+  </div>
+
+  <div style="position:absolute; padding-top: 10px; padding-bottom: 12px; top:15px; left:350px; z-index:2; overflow-y: 5;">
+    <span style="background-color: gray; font-family: 'Courier New', Courier, monospace;">Date:</span><br>
+    <select id="dateSelect">
+      <option>Loading...</option>
+    </select>
+  </div>
+
+  <button id="updateBtn" style="position:absolute; padding-top: 10px; padding-bottom: 12px; top:22px; left:490px; z-index:2;">Update</button>
+  <button id="delBtn" style="position:absolute; padding-top: 10px; padding-bottom: 12px; top:22px; left:555px; z-index:2;">Delete</button>
+
+  <button id="crtBtn" style="position:absolute; padding-top: 10px; padding-bottom: 12px; top:22px; left:640px; z-index:2;">Create</button>
+  <input id="snapshotInput" style="position:absolute; padding-top: 10px; padding-bottom: 12px; top:22px; left:700px; z-index:2;"></input>
+
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.8.0/dist/leaflet.css"

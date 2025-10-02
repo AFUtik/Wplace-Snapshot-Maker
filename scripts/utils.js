@@ -13,6 +13,28 @@ export async function folderExists(folderPath) {
   }
 }
 
+export async function removeEmptyParents(dirPath, stopAt) {
+  let current = dirPath;
+
+  while (true) {
+    if (path.resolve(current) === path.resolve(stopAt)) break;
+
+    try {
+      const files = await fs.readdir(current);
+      if (files.length === 0) {
+        await fs.rm(current, {recursive: true, force: true});
+        console.log(`Removed empty directory: ${current}`);
+        current = path.dirname(current);
+      } else {
+        break;
+      }
+    } catch (err) {
+      console.error(`Error checking directory ${current}:`, err);
+      break;
+    }
+  }
+}
+
 export async function readJson(filePath, options = { default: {}, createIfAbsent: false }) {
   try {
     const data = await fs.readFile(filePath, "utf8");
@@ -71,6 +93,11 @@ export function pathToDate(p) {
 export function pathToFormatted(p) {
   const [year, month, day, hour, minute] = p.trim().split(/\/+/);
   return `${month}/${day}/${year}-${hour}:${minute}`;
+}
+
+export function formattedToPath(p) {
+  const [month, day, year, hour, minute] = p.trim().split(/[\:-\s/]+/);
+  return `${year}/${month}/${day}/${hour}/${minute}`;
 }
 
 export function dateToPath(d) {

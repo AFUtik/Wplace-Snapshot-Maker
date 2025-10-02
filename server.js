@@ -6,7 +6,7 @@ import PQueue from "p-queue";
 import { createCanvas, loadImage } from 'canvas';
 
 import * as cmd from "./scripts/commands.ts"
-import {Context} from "./scripts/context.ts"
+import {Area, Context, Snapshot} from "./scripts/context.ts"
 
 import * as utils from "./scripts/utils.js"
 
@@ -25,6 +25,19 @@ const DEFAULT_SETTINGS = {
   min_zoom: 6,
   concurrency: 4
 };
+
+const commands = {
+  load: cmd.handleLoad,
+  snapshot: cmd.handleSnapshot,
+  delete: cmd.handleDelete,
+  current: cmd.handleCurrent,
+  memory: cmd.handleMemory,
+  show: cmd.handleShow,
+  limit: cmd.handleLimit,
+  image: cmd.handleImage,
+  schedule: cmd.handleSchedule
+}
+
 
 let settings = await utils.readJson('settings.json')
 
@@ -91,10 +104,104 @@ app.get("/settings.json", async (req, res) => {
 });
 
 app.get('/origin', async (req, res) => {
-    const x = (context.AREA[0][0] + context.AREA[1][0]) / 2;
-    const y = (context.AREA[0][1] + context.AREA[1][1]) / 2;
-    
-    res.json({ x, y });
+  if(!context.snapshot.name) return;
+
+  console.log(context.snapshot.area.center())
+
+  res.json(context.snapshot.area.center());
+});
+
+app.get('/snapshots', async (req, res) => {
+  res.json({"items": await cmd.getSnapshots()})
+});
+
+app.get('/dates', async (req, res) => {
+  if(!context.snapshot.name) return;
+  
+  const dates = await cmd.getSnapshotChanges(context.snapshot, "-d");
+  
+  res.json({"items": dates.map(d => utils.dateToFormatted(d))})
+});
+
+app.get('/loadByName/:name', async (req, res) => {
+  const name = req.params.name;
+
+  await commands.load(
+    context, {
+      args:   ['load', name, ""],
+      flags:  [],
+      params: {}
+    }
+  );
+
+  res.json({ status: "ok", received: req.body });
+});
+
+app.post('/loadByDate', async (req, res) => {
+  if(!context.snapshot.name) return;
+
+  const date = req.body.date;
+
+  await commands.load(
+    context, {
+      args:   ['load', context.snapshot.name, utils.formattedToPath(date)],
+      flags:  [],
+      params: {}
+    }
+  );
+  
+  res.json({ status: "ok", received: req.body });
+});
+
+app.get('/create/:name', async (req, res) => {
+  try {
+    const newSnapshot = await commands.snapshot(
+      context, {
+        args:   ['snapshot', req.params.name],
+        flags:  ['-s'],
+        params: []
+      }
+    );
+    res.setHeader("Content-Type", "application/json");
+    res.send({ name: newSnapshot.name, date: newSnapshot.date });
+  } catch (err) {
+    console.log(err)
+    res.status(500).send({ error: "Failed to create snapshot to client.js" });
+  }
+});
+
+app.get('/update', async (req, res) => {
+  try {
+    const newSnapshot = await commands.snapshot(
+      context, {
+        args:   ['snapshot', context.SNAPSHOT_NAME],
+        flags:  ['-s'],
+        params: []
+      }
+    );
+    res.setHeader("Content-Type", "application/json");
+    res.send({ name: newSnapshot.name, date: newSnapshot.date });
+  } catch (err) {
+    console.log(err)
+    res.status(500).send({ error: "Failed to load snapshot to client.js" });
+  }
+});
+
+app.get('/delete', async (req, res) => {
+  if(!context.snapshot.name) {
+    console.log("Snapshot not chosen.");
+    return;
+  }
+
+  await commands.delete(
+    context, {
+      args:   ['delete', context.snapshot.name, context.snapshot.date],
+      flags:  [],
+      params: {}
+    }
+  );
+  
+  res.json({ status: "ok", received: req.body });
 });
 
 const renderQueue = new PQueue({ concurrency: context.CONCURRENCY });
@@ -134,7 +241,7 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
         let img_buf = context.IMAGE_BUFFER_CACHE.get(chunkKey);
         if (!img_buf) {
           try {
-            const p = `${context.SNAPSHOT_PATH}/${cx}_${cy}.png`;
+            const p = `${context.snapshot.fullPath}/${cx}_${cy}.png`;
             await fs.access(p);
 
             img_buf = await fs.readFile(p);
@@ -184,25 +291,25 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
   }, { priority: 12 - z });
 });
 
-app.post('/points', async (req, res) => {
+app.post('/points/rectangle', async (req, res) => {
   const { tileX0, tileY0, tileX1, tileY1 } = req.body;
 
-  context.AREA = normalizeCorners([tileX0, tileY0], [tileX1, tileY1]);
+  context.selection = new Area(normalizeCorners([tileX0, tileY0], [tileX1, tileY1]), "rectangle");
 
   res.json({ status: "ok", received: req.body });
 })
 
-const commands = {
-  load: cmd.handleLoad,
-  snapshot: cmd.handleSnapshot,
-  delete: cmd.handleDelete,
-  current: cmd.handleCurrent,
-  memory: cmd.handleMemory,
-  show: cmd.handleShow,
-  limit: cmd.handleLimit,
-  image: cmd.handleImage,
-  schedule: cmd.handleSchedule
-}
+app.post('/points/polygon', async (req, res) => {
+  context.selection = new Area(req.body.points, "polygon");
+
+  res.json({ status: "ok", received: req.body });
+})
+
+app.get('/points/clear', async (req, res) => {
+  context.selection = new Area([]);
+
+  res.json({ status: "ok", received: req.body });
+})
 
 function parseInput(line) {
   const allArgs = line.trim().split(/\s+/);

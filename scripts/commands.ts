@@ -3,13 +3,22 @@ import fs from 'fs/promises';
 import path from "path";
 
 import { createCanvas, Image } from 'canvas';
-import { SNAPSHOTS_DIR, Snapshot, Context } from './context.ts';
+import { SNAPSHOTS_DIR, Area, Snapshot, Context } from './context.ts';
 
 // operations with snapshot //
 
-async function getSnapshotChanges(snapshot: Snapshot, flag: string = ""): Promise<any[]> {
-  const files = await fs.readdir(snapshot.rootPath, { withFileTypes: true }); 
-  const years: string[] = files.filter(d => d.isDirectory()).map(d => d.name);
+export async function getSnapshots() {
+    let names = [];
+    const snapshots = await fs.readdir("data/snapshots", { withFileTypes: true });
+    for (const snapshot_folder of snapshots) names.push(snapshot_folder.name);
+       
+    return names;
+}
+
+export async function getSnapshotChanges(snapshot: Snapshot, flag: string = ""): Promise<any[]> {
+  const years: string[] = (await fs.readdir(snapshot.rootPath, { withFileTypes: true }))
+    .filter(d => d.isDirectory())
+    .map(d => d.name);
   const dates: any[] = [];
   
   for (const year of years) {
@@ -100,14 +109,14 @@ export async function handleLoad(ctx: Context, input: {[key: string]: any}) {
     let [, name, date] = input.args as [string, string, string]; 
 
     const snapshot: Snapshot = new Snapshot(name, date);
-    if(!await utils.folderExists(snapshot.fullPath)) {
+    if(!await snapshot.exists()) {
         console.log("Snapshot not found.")
         return;
     }
     await snapshot.fetchMeta();
 
     if (!name) {
-        if (!ctx.SNAPSHOT_NAME) name = ctx.SNAPSHOT_NAME;
+        if (!ctx.snapshot.name) name = ctx.snapshot.name;
         else {
             console.log("Name is not chosen.");
             return;
@@ -115,14 +124,15 @@ export async function handleLoad(ctx: Context, input: {[key: string]: any}) {
     }
 
     if (date) {
-        const [month = 0, day = 0, year = 0, hour = 0, minute = 0] = (date || "").trim().split(/[-/:/]+/).map(Number);
+        const parts = (date || "").trim().split(/[-:\s/]+/).map(Number);
+        const [year, month, day, hour = 0, minute = 0] = parts;
 
         const after = new Date(year, month - 1, day, hour, minute);
         const dates = await getSnapshotChanges(snapshot);
 
         const candidates = dates.filter(d => d >= after);
 
-        snapshot.setDate(candidates[0]);
+        await snapshot.setDate(candidates[0]);
     }
 
     // Saves to settings 
@@ -131,20 +141,24 @@ export async function handleLoad(ctx: Context, input: {[key: string]: any}) {
     console.log(`Snapshot was succefully loaded. The current snapshot is ${name}[${utils.pathToFormatted(snapshot.date)}].`)
 }
 
-export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}) {
-    let [, name, tlx0, tly0, tlx1, tly1] = input.args;
+export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}): Promise<Snapshot> {
+    let [, name] = input.args;
 
     if (!name) {
-        if (ctx.SNAPSHOT_NAME) {
-            name = ctx.SNAPSHOT_NAME;
+        if (ctx.snapshot.name) {
+            name = ctx.snapshot.name;
         } else {
             console.log("Name is not defined.");
-            return;
+            return new Snapshot("");
         }
     }
 
-    const snapshot: Snapshot = new Snapshot(name);
-    const meta = await snapshot.readMeta();
+    const snapshot: Snapshot = new Snapshot(name, "", new Area([]));
+    await snapshot.fetchMeta();
+
+    if(!ctx.selection.empty()) snapshot.area = ctx.selection;
+
+    const meta = snapshot.meta;
 
     await snapshot.setDateNow();
     await fs.mkdir(snapshot.fullPath, {recursive: true});
@@ -156,27 +170,7 @@ export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}
         limit = Number(limitParam.value) * 1024 * 1024; // converts megabytes into bytes.
     }
 
-    if (!tlx0) {
-        if (ctx.AREA.length > 0) {
-            tlx0 = ctx.AREA[0][0];
-            tly0 = ctx.AREA[0][1];
-            tlx1 = ctx.AREA[1][0];
-            tly1 = ctx.AREA[1][1];
-
-            snapshot.boundaries = ctx.AREA;
-        }else {
-            console.log("Points are not defined.")
-            return;
-        }
-    }    
-
-    const queue = [];
-
-    for (let y = tly0; y >= tly1; y--) {
-        for (let x = tlx0; x <= tlx1; x++) {
-            queue.push([x, y]);
-        }
-    }
+    const queue: number[][] = await snapshot.area.getXY();
 
     let downloadSize = 0;
     while (queue.length > 0) {
@@ -229,38 +223,38 @@ export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}
     console.log("All tiles saved successfully!");
 
     meta.latest_date = snapshot.date;
-    meta.boundaries = [[tlx0, tly0], [tlx1, tly1]];
-    meta.limit = limit;
+    meta.area = snapshot.area.data;
+    meta.area_type = snapshot.area.type;
+    meta.limit  = limit;
 
     await utils.writeJson(`data/snapshots/${name}/metadata.json`, meta);
 
     if (input.flags.includes('-s') || input.flags.includes('-switch')) {
         await ctx.changeSnapshot(snapshot);
     }
+
+    return snapshot;
 }
 
 export async function handleDelete(ctx: Context, input: {[key: string]: any}) {
     const [, name, date] = input.args;
-    if (name) {
-        try {
-            let path = ""
-            if (date) {
-                path = `data/snapshots/${name}/${date}`;
-            } else {
-                path = `data/snapshots/${name}`;
-            }
-            const stat = await fs.stat(path);
-            if (stat.isDirectory()) {
-                await fs.rm(path, { recursive: true, force: true });
-                console.log(`Snapshot was deleted.`);
-            }
-        } catch (err: any) {
-            if (err.code === "ENOENT") {
-                console.log("Snapshot not found");
-            } else {
-                console.error("Error while deleting:", err);
-            }
+    if(!name) {
+        console.log("Name not specified.");
+        return;
+    }
+    const snapshot: Snapshot = new Snapshot(name, date);
+
+    if(await snapshot.exists()) {
+        const stat = await fs.stat(snapshot.fullPath);
+        if (stat.isDirectory()) {
+            await fs.rm(snapshot.fullPath, { recursive: true, force: true });
+            await utils.removeEmptyParents(path.dirname(snapshot.fullPath), snapshot.name);
+
+            console.log(`Snapshot was deleted.`);
         }
+    } else {
+        console.log("Snapshot not found.")
+        return;
     }
 }
 
@@ -287,7 +281,7 @@ export async function handleMemory(ctx: Context, input: {[key: string]: any}) {
 }
 
 export async function handleCurrent(ctx: Context, input: {[key: string]: any}) {
-    console.log(ctx.SNAPSHOT_NAME, ctx.SNAPSHOT_PATH);
+    console.log(ctx.snapshot.name, ctx.snapshot.date);
 }
 
 export async function handleShow(ctx: Context, input: {[key: string]: any}) {
@@ -329,33 +323,24 @@ export async function handleLimit(ctx: Context, input: {[key: string]: any}) {
 export async function handleImage(ctx: Context, input: {[key: string]: any}) {
     const [, img_name] = input.args;
 
-    const tlx0 = ctx.AREA[0][0];
-    const tly0 = ctx.AREA[0][1];
-    const tlx1 = ctx.AREA[1][0];
-    const tly1 = ctx.AREA[1][1];
     
-    const width = (tlx1 - tlx0 + 1) * 1000;
-    const height = (tly0 - tly1 + 1) * 1000;
-    const canvas = createCanvas(width, height);
+    const canvas = createCanvas((ctx.selection.width+1)*1000, (ctx.selection.height+1)*1000);
     const __ctx = canvas.getContext('2d');
 
-    const tiles = [];
-    for (let cy = tly0; cy >= tly1; cy--) {
-        for (let cx = tlx0; cx <= tlx1; cx++) {
-            tiles.push({ cx, cy });
-        }
-    }
+    const tiles: number[][] = await ctx.selection.getXY();
+    const tlx0 = ctx.selection.data[0][0];
+    const tly1 = ctx.selection.data[1][1];
 
     for (let i = 0; i < tiles.length; i += ctx.CONCURRENCY) {
         const batch = tiles.slice(i, i + ctx.CONCURRENCY);
-        await Promise.all(batch.map(async tile => {
-            const buf = await utils.downloadFileWithRetry(`https://backend.wplace.live/files/s0/tiles/${tile.cx}/${tile.cy}.png`);
+        await Promise.all(batch.map(async ([cx, cy]) => {
+            const buf = await utils.downloadFileWithRetry(`https://backend.wplace.live/files/s0/tiles/${cx}/${cy}.png`);
             const img = new Image();
             img.src = buf;
             if (img.width && img.height) {
-                __ctx.drawImage(img, (tile.cx - tlx0) * 1000, (tile.cy - tly1) * 1000);
+                __ctx.drawImage(img, (cx - tlx0) * 1000, (cy - tly1) * 1000);
             } else {
-                console.warn(`Tile ${tile.cx},${tile.cy} is empty`);
+                console.warn(`Tile ${cx},${cy} is empty`);
             }
         }));
     }

@@ -1,31 +1,148 @@
 import { LRUCache } from 'lru-cache';
 
-import readline from 'readline';
+import readline from "readline";
 import * as utils from './utils.js'
 
 export const SNAPSHOTS_DIR = "data/snapshots";
 
 const DEFAULT_META: {[key: string]: any} = {
     latest_date: "",
-    boundaries: [],
+    area: [],
+    area_type: 'rectangle',
     limit: 0,
     memory_cache: {}
 };
 
+export class Area {
+    data: number[][];
+    type: string;
+
+    width:  number;
+    height: number;
+
+    constructor(data: number[][], type: string = "rectangle") {
+        this.data = data;
+        this.type = type;
+
+        if(type=="rectangle" && data.length > 0) {
+            this.width  = Math.abs(data[0][0] - data[1][0]);
+            this.height = Math.abs(data[0][1] - data[1][1]);
+        } else if(type=="polygon") {
+            const xs = data.map(p => p[0]);
+            const ys = data.map(p => p[1]);
+
+            const minx = Math.min(...xs);
+            const maxx = Math.max(...xs);
+            const miny = Math.min(...ys);
+            const maxy = Math.max(...ys);
+
+            this.width  = maxx - minx;
+            this.height = maxy - miny;
+        } else {
+            this.width  = 0;
+            this.height = 0;
+        }
+    }
+
+    empty() {
+        return this.data.length == 0;
+    }
+
+    center() {
+        let x = 0;
+        let y = 0;
+        if(this.type == 'rectangle') {
+            x = (this.data[0][0] + this.data[1][0]) / 2;
+            y = (this.data[0][1] + this.data[1][1]) / 2;
+        } else if (this.type == 'polygon') {
+            const xs = this.data.map(p => p[0]);
+            const ys = this.data.map(p => p[1]);
+
+            const minx = Math.min(...xs);
+            const maxx = Math.max(...xs);
+            const miny = Math.min(...ys);
+            const maxy = Math.max(...ys);
+
+            x = (minx + maxx) / 2;
+            y = (miny + maxy) / 2;
+        }
+        return {x, y};
+    }
+
+    private pointInPolygon(point: [number, number], vs: number[][]): boolean {
+        const [x, y] = point;
+        let inside = false;
+        for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
+            const xi = vs[i][0], yi = vs[i][1];
+            const xj = vs[j][0], yj = vs[j][1];
+
+            const intersect = ((yi > y) !== (yj > y)) &&
+                (x < (xj - xi) * (y - yi) / (yj - yi + 0.0000001) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+
+    private rectIntersectsPolygon(x: number, y: number, poly: number[][]): boolean {
+        const corners: [number, number][] = [
+            [x, y],
+            [x+1, y],
+            [x, y+1],
+            [x+1, y+1]
+        ];
+        return corners.some(c => this.pointInPolygon(c, poly));
+    }
+
+    async getXY(): Promise<number[][]> {
+        let queue = [];
+
+        if(this.type == "rectangle") {
+            const [x0, y0] = this.data[0] as [number, number];
+            const [x1, y1] = this.data[1] as [number, number];
+            for (let y = y0; y >= y1; y--) {
+                for (let x = x0; x <= x1; x++) {
+                    queue.push([x, y]);
+                }
+            }
+        } else if(this.type == "polygon") {
+            const xs = this.data.map(p => p[0]);
+            const ys = this.data.map(p => p[1]);
+
+            const minx = Math.min(...xs);
+            const maxx = Math.max(...xs);
+            const miny = Math.min(...ys);
+            const maxy = Math.max(...ys);
+
+            for (let y = Math.floor(miny); y <= Math.ceil(maxy); y++) {
+                for (let x = Math.floor(minx); x <= Math.ceil(maxx); x++) {
+                    if (this.rectIntersectsPolygon(x, y, this.data)) {
+                        queue.push([Math.floor(x), Math.floor(y)]);
+                    }
+                }
+            }
+        }
+
+        return queue;
+    }
+}
+
 export class Snapshot {
     name: string;
     date: string;
-    boundaries: number[][];
 
     fullPath: string;
     rootPath: string;
 
     meta: any;
     
-    constructor(name: string, date: string = "", boundaries = []) {
+    area: Area;
+    
+    constructor(name: string, date: string = "", area: Area = new Area([[0, 0], [0, 0]])) {
         this.name = name;
         this.date = date;
-        this.boundaries = boundaries;
+
+        this.area = area;
+        this.meta = DEFAULT_META;
 
         this.fullPath = `${SNAPSHOTS_DIR}/${name}/${date}`
         this.rootPath = `${SNAPSHOTS_DIR}/${name}`
@@ -53,14 +170,21 @@ export class Snapshot {
     }
 
     async fetchMeta() { 
+        if(!await utils.folderExists(this.rootPath)) return;
+
         const meta = await this.readMeta();
 
         await this.setDatePath(meta.latest_date);
-        this.boundaries = meta.boundaries;
+        this.area = new Area(meta.area, meta.area_type)
     }
 
     async writeMeta(meta: any) {
         await utils.writeJson(`${SNAPSHOTS_DIR}/${this.name}/metadata.json`, meta)
+    }
+
+    async exists(): Promise<boolean> {
+        if(!await utils.folderExists(this.fullPath)) return false;
+        return true;
     }
 }
 
@@ -75,13 +199,14 @@ export class Context {
     CACHE_CONTROL_LIFETIME: number;
     DOWNLOAD_COOLDOWN:      number;
     DOWNLOAD_LIMIT:         number;
-    SNAPSHOT_PATH: string;
-    SNAPSHOT_NAME: string;
-    AREA: number[][];
+
+    snapshot: Snapshot;
+    
+    selection: Area;
 
     constructor(settings: {[key: string]: any}) {
         this.rl = readline.createInterface({
-            input: process.stdin,
+            input:  process.stdin,
             output: process.stdout,
             prompt: '> '
         });
@@ -99,10 +224,9 @@ export class Context {
         this.DOWNLOAD_COOLDOWN = settings.download_cooldown;
         this.DOWNLOAD_LIMIT = settings.download_limit;
 
-        this.SNAPSHOT_PATH = 'data/snapshots/' + settings.current_snapshot + '/' + settings.current_date;
-        this.SNAPSHOT_NAME = settings.current_snapshot;
-
-        this.AREA = settings.selection;
+        this.selection = new Area([]);
+        this.snapshot = new Snapshot("", "", new Area([]));
+        
     }
 
     ask(query: string): Promise<string> {
@@ -116,17 +240,6 @@ export class Context {
 
     async changeSnapshot(snapshot: Snapshot) {
         this.clearCache();
-
-        this.SNAPSHOT_PATH = snapshot.fullPath;
-        this.SNAPSHOT_NAME = snapshot.name;
-        this.AREA = snapshot.boundaries;
-
-        const settings: {[key: string]: any} = await utils.readJson('settings.json');
-
-        settings.current_snapshot = snapshot.name;
-        settings.current_date     = snapshot.date;
-        settings.selection        = snapshot.boundaries;
-
-        await utils.writeJson("settings.json", settings);
+        this.snapshot = snapshot;
     }
 }
