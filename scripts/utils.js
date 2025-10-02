@@ -40,7 +40,15 @@ export async function readJson(filePath, options = { default: {}, createIfAbsent
     const data = await fs.readFile(filePath, "utf8");
     const json = JSON.parse(data);
 
-    return Object.keys(json).length === 0 ? options.default : json;
+    if (Object.keys(options.default).length !== 0) {
+      for (const [key, value] of Object.entries(options.default)) {
+        if (!(key in json)) {
+          json[key] = value;
+        }
+      }
+    }
+
+    return json;
   } catch (err) {
     if (err.code === "ENOENT" && options.createIfAbsent) {
       await fs.mkdir(path.dirname(filePath), { recursive: true });
