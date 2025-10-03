@@ -1,22 +1,6 @@
-async function loadSettings() {
-    try {
-        const res = await fetch("/settings.json");
-        if (!res.ok) {
-            console.error("Failed to load settings.json, using defaults.");
-            return {};
-        }
-        return await res.json();
-    } catch (err) {
-        console.error("Error loading settings.json:", err);
-        return {};
-    }
-}
-
 let SELECTION_TYPE = "rectangle";
 
 async function initMap() {
-    const settings = await loadSettings();
-
     const map = L.map('leaflet-map', {
         maxBounds: [[180, -Infinity], [-180, Infinity]],
         maxBoundsViscosity: 1,
@@ -31,19 +15,17 @@ async function initMap() {
         map.setView([0, 0], 0);
     }
 
-    if (settings.load_topographic) {
-        L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
-            attribution: 'Map data: © OpenStreetMap contributors, SRTM | Map style: © OpenTopoMap (CC-BY-SA)',
-            subdomains: 'abc',
-            maxZoom: 17
-        }).addTo(map);
-    }
+    L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+        attribution: 'Map data: © OpenStreetMap contributors, SRTM | Map style: © OpenTopoMap (CC-BY-SA)',
+        subdomains: 'abc',
+        maxZoom: 17
+    }).addTo(map);
 
-    L.tileLayer(`http://${settings.server_ip}:${settings.server_port}/tiles/{z}/{x}/{y}.png`, {
+    L.tileLayer(`/tiles/{z}/{x}/{y}.png`, {
         tileSize: 512,
         maxNativeZoom: 12,
         maxZoom: 16,
-        minZoom: settings.min_zoom,
+        minZoom: 6,
         noWrap: true
     }).addTo(map);
 

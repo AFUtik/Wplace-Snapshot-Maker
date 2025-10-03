@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs/promises';
 import PQueue from "p-queue";
+import dotenv from "dotenv"
 
 import { createCanvas, loadImage } from 'canvas';
 
@@ -11,18 +12,12 @@ import {Area, Context, Snapshot} from "./scripts/context.ts"
 import * as utils from "./scripts/utils.js"
 
 const DEFAULT_SETTINGS = {
-  load_topographic: true,
-  current_snapshot: "",
-  current_date: "",
   cache_control: true,
   cache_control_lifetime: 60,
   tile_cache: 300,
   chunk_image_cache: 200,
   download_cooldown: 1000,
   download_limit: 5,
-  server_ip: "localhost",
-  server_port: 3000,
-  min_zoom: 6,
   concurrency: 4
 };
 
@@ -39,11 +34,11 @@ const commands = {
 }
 
 
-let settings = await utils.readJson('settings.json')
+let settings = await utils.readJson('data/settings.json')
 
 if (!settings || typeof settings !== 'object') {
   settings = { ...DEFAULT_SETTINGS };
-  await utils.writeJson('settings.json', settings);
+  await utils.writeJson('data/settings.json', settings);
 } else {
   let changed = false;
   for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
@@ -53,12 +48,16 @@ if (!settings || typeof settings !== 'object') {
     }
   }
   if (changed) {
-    await utils.writeJson('settings.json', settings);
+    await utils.writeJson('data/settings.json', settings);
   }
 }
 
+dotenv.config({quiet: true});
+const port = process.env.PORT;
+const host = process.env.HOST;
+
 const app = express();
-app.listen(settings.server_port, settings.server_ip, () => console.log(`Server on ${settings.server_ip}:${settings.server_port}.`));
+app.listen(port, host, () => console.log(`Server on ${host}:${port}.`));
 
 // Context of the program //
 
@@ -288,7 +287,7 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
       res.end(buf);
     }
 
-  }, { priority: 12 - z });
+  }, { priority: z });
 });
 
 app.post('/points/rectangle', async (req, res) => {
