@@ -1,5 +1,7 @@
 let SELECTION_TYPE = "rectangle";
 
+let polygon;
+
 async function initMap() {
     const map = L.map('leaflet-map', {
         maxBounds: [[180, -Infinity], [-180, Infinity]],
@@ -39,11 +41,13 @@ async function initMap() {
     });
 
     let markers = [];
-    let polygon;
+    
 
     map.on('contextmenu', function (e) {
         if(SELECTION_TYPE === "rectangle") {
             if (markers.length < 2) {
+                if(polygon) polygon.remove();
+
                 const marker = L.marker(e.latlng).addTo(map);
 
                 const tile_coords = map.project(e.latlng, 3);
@@ -55,14 +59,19 @@ async function initMap() {
 
                 markers.push(marker);
             } else {
+                if(polygon) polygon.remove();
+
                 markers.forEach(m => map.removeLayer(m));
                 markers = [];
-
-                if(polygon) polygon.remove();
 
                 fetch("/points/clear").then(res => res.json())
                     .then(data => console.log("Response:", data))
                     .catch(err => console.error("Error:", err));
+
+                localStorage.setItem('selection', JSON.stringify({
+                    points: [],
+                    type: 'rectangle'
+                }));
             }
 
             if (markers.length == 2) {
@@ -88,14 +97,16 @@ async function initMap() {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
-                        tileX0: Math.floor(px_coords0.x),
-                        tileY0: Math.floor(px_coords0.y),
-                        tileX1: Math.floor(px_coords1.x),
-                        tileY1: Math.floor(px_coords1.y)
+                        points: [[x0, y0], [x1, y1]]
                     })
                 }).then(res => res.json())
                     .then(data => console.log("Response:", data))
                     .catch(err => console.error("Error:", err));
+
+                localStorage.setItem('selection', JSON.stringify({
+                    points: [[x0, y0], [x1, y1]],
+                    type: 'rectangle'
+                }));
             }
         } else if(SELECTION_TYPE === "polygon") {
             const marker = L.marker(e.latlng).addTo(map);
@@ -126,7 +137,12 @@ async function initMap() {
                 body: JSON.stringify({ points: points })
             }).then(res => res.json())
                     .then(data => console.log("Response:", data))
-                    .catch(err => console.error("Error:", err));;
+                    .catch(err => console.error("Error:", err));
+
+            localStorage.setItem('selection', JSON.stringify({
+                points: latlngs,
+                type: 'polygon'
+            }));
         }
     });
 
@@ -187,6 +203,12 @@ date_sel.addEventListener("change", async () => {
       body: JSON.stringify({ date: date })
     });
     const result = await response.json();
+
+    localStorage.setItem('snapshot', JSON.stringify({
+        name: result.name,
+        date: result.date
+    }));
+
     console.log("Response:", result);
   } catch (err) {
     console.error("Error query:", err);
@@ -203,6 +225,14 @@ snapshot_sel.addEventListener("change", async () => {
   try {
     const response = await fetch(`/loadByName/${text}`)
     const result = await response.json();
+
+    localStorage.setItem('snapshot', JSON.stringify({
+        name: result.snapshot.name,
+        date: result.snapshot.date
+    }));
+
+    date_sel.options[0].text = result.snapshot.date;
+
     console.log("Response:", result);
   } catch (err) {
     console.error("Error query:", err);
@@ -248,3 +278,51 @@ crt_btn.addEventListener("click", async () => {
        console.error("Error while query:", err); 
     }
 });
+
+async function loadSnapshot() {
+    const savedSnapshot = localStorage.getItem('snapshot');
+    if(savedSnapshot) {
+        const json = JSON.parse(savedSnapshot);
+        if(json.name) {
+            await fetch(`/load`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: json.name, date: json.date})
+            });
+
+            snapshot_sel.options[0].text = json.name;
+            date_sel.options[0].text     = json.date;
+        }
+    }
+}
+
+async function loadSelection() {
+    const savedSelection = localStorage.getItem('selection');
+    if(savedSelection) {
+        const json = JSON.parse(savedSelection);
+        if(json.points.length > 0) {
+            await fetch(`/points/${json.type}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ points: json.points})
+            });
+
+            const x0 = json.points[0][0];
+            const y0 = json.points[0][1];
+            const x1 = json.points[1][0];
+            const y1 = json.points[1][1];
+
+            const bounds = L.latLngBounds([map.unproject([x0, y0], 3), map.unproject([x1, y1], 3)]);
+            
+            polygon = L.rectangle(bounds, {
+                color: "blue", 
+                weight: 2,
+                fillColor: "blue", 
+                fillOpacity: 0.1
+            }).addTo(map);
+        }
+    }
+}
+
+loadSnapshot();
+loadSelection();

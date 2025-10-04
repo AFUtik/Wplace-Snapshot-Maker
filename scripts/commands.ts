@@ -1,9 +1,15 @@
 import * as utils from "./utils.js" 
-import fs from 'fs/promises';
+
+import fs  from 'fs/promises';
+import fsc from 'fs';
+
 import path from "path";
 
-import { createCanvas, Image } from 'canvas';
+import { createCanvas, Image, loadImage } from 'canvas';
 import { SNAPSHOTS_DIR, Area, Snapshot, Context } from './context.ts';
+
+import pkg from "gif-encoder-2";
+const GIFEncoder = pkg.default || pkg;
 
 // operations with snapshot //
 
@@ -105,13 +111,14 @@ async function getSnapshotSize(snapshot: Snapshot, options: GetSnapshotSizeOptio
 
 // Commands //
 
-export async function handleLoad(ctx: Context, input: {[key: string]: any}) {
+export async function handleLoad(ctx: Context, input: {[key: string]: any}): Promise<Snapshot> {
     let [, name, date] = input.args as [string, string, string]; 
+    if(name == ctx.snapshot.name && date == ctx.snapshot.date) return ctx.snapshot;
 
     const snapshot: Snapshot = new Snapshot(name, date);
     if(!await snapshot.exists()) {
         console.log("Snapshot not found.")
-        return;
+        return new Snapshot("");
     }
     await snapshot.fetchMeta();
 
@@ -119,7 +126,7 @@ export async function handleLoad(ctx: Context, input: {[key: string]: any}) {
         if (!ctx.snapshot.name) name = ctx.snapshot.name;
         else {
             console.log("Name is not chosen.");
-            return;
+            return new Snapshot("");
         }
     }
 
@@ -139,6 +146,8 @@ export async function handleLoad(ctx: Context, input: {[key: string]: any}) {
 
     await ctx.changeSnapshot(snapshot);
     console.log(`Snapshot was succefully loaded. The current snapshot is ${name}[${utils.pathToFormatted(snapshot.date)}].`)
+
+    return snapshot;
 }
 
 export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}): Promise<Snapshot> {
@@ -322,7 +331,6 @@ export async function handleLimit(ctx: Context, input: {[key: string]: any}) {
 
 export async function handleImage(ctx: Context, input: {[key: string]: any}) {
     const [, img_name] = input.args;
-
     
     const canvas = createCanvas((ctx.selection.width+1)*1000, (ctx.selection.height+1)*1000);
     const __ctx = canvas.getContext('2d');
@@ -334,9 +342,10 @@ export async function handleImage(ctx: Context, input: {[key: string]: any}) {
     for (let i = 0; i < tiles.length; i += ctx.CONCURRENCY) {
         const batch = tiles.slice(i, i + ctx.CONCURRENCY);
         await Promise.all(batch.map(async ([cx, cy]) => {
-            const buf = await utils.downloadFileWithRetry(`https://backend.wplace.live/files/s0/tiles/${cx}/${cy}.png`);
-            const img = new Image();
-            img.src = buf;
+            let img_buf = ctx.IMAGE_BUFFER_CACHE.get(`${cx}_${cy}`);
+            if(!img_buf) img_buf = await utils.downloadFileWithRetry(`https://backend.wplace.live/files/s0/tiles/${cx}/${cy}.png`);
+             
+            const img = await loadImage(img_buf);
             if (img.width && img.height) {
                 __ctx.drawImage(img, (cx - tlx0) * 1000, (cy - tly1) * 1000);
             } else {
@@ -349,7 +358,101 @@ export async function handleImage(ctx: Context, input: {[key: string]: any}) {
 
     const buffer = canvas.toBuffer('image/png');
     await fs.writeFile(`data/images/${img_name}.png`, buffer);
+
     console.log(`Image '${img_name}' was uploaded to directory 'data/images/'.`);
+}
+
+export async function handleGif(ctx: Context, input: {[key: string]: any}) {
+    const [, output_name, delay, from, to] = input.args;
+    const width  = ctx.selection.width  * 1000;
+    const height = ctx.selection.height * 1000;
+    const tlx0 = ctx.selection.data[0][0];
+    const tly1 = ctx.selection.data[1][1];
+
+    const from_date = utils.pathToDate(from);
+    const to_date   = utils.pathToDate(to);
+
+    const dates = await getSnapshotChanges(ctx.snapshot);
+    const filtered_dates = dates.filter((d) => d >= from_date && d <= to_date);
+
+    const gridXY = await ctx.selection.getXY();
+    const tileOffsets = gridXY.map(([cx, cy]) => {
+        return {
+            x: Math.round((cx - tlx0) * 1000),
+            y: Math.round((cy - tly1) * 1000),
+            name: `${cx}_${cy}.png`
+        };
+    });
+
+    const canvas = createCanvas(width, height);
+    const __ctx = canvas.getContext('2d');
+
+    const outPath = `data/gifs/${output_name}.gif`;
+    const writeStream = fsc.createWriteStream(outPath);
+    
+    const encoder = new GIFEncoder(width, height);
+    encoder.createReadStream().pipe(writeStream);
+    
+    encoder.start();
+    encoder.setRepeat(0);
+    encoder.setDelay(Number(delay));
+    encoder.setQuality(10);
+
+    let prevFrameBuffer = null;
+    const useFrameDedup = true;
+
+    for(const date of filtered_dates) {
+        __ctx.fillStyle = "#ffffff";
+        __ctx.fillRect(0, 0, width, height);
+
+        const folderPath = `data/snapshots/${ctx.snapshot.name}/${utils.dateToPath(date)}/`
+        for(const [cx, cy] of gridXY) {
+            try {
+                const buffer = await fs.readFile(folderPath+`${cx}_${cy}.png`)
+                const img = await loadImage(buffer);
+                
+                __ctx.drawImage(img, (cx - tlx0) * 1000, (cy - tly1) * 1000);
+            } catch(e) {
+                continue;
+            }
+        }
+
+        const loadPromises = tileOffsets.map(async (t) => {
+            const p = folderPath + t.name;
+                try {
+                    const buf = await fs.readFile(p);
+                    const img = await loadImage(buf);
+                    return { img, x: t.x, y: t.y };
+                } catch (e) {
+                    return null;
+                }
+        });
+
+        const images = await Promise.all(loadPromises);
+        for (const it of images) {
+        if (!it) continue;
+            __ctx.drawImage(it.img, it.x, it.y);
+        }
+
+        if (useFrameDedup) {
+            const imageData = __ctx.getImageData(0, 0, width, height);
+            const buf = Buffer.from(imageData.data.buffer);
+
+            if (prevFrameBuffer && Buffer.compare(prevFrameBuffer, buf) === 0) {
+                continue;
+            }
+            prevFrameBuffer = buf;
+            encoder.addFrame(buf);
+        } else encoder.addFrame(__ctx);
+    }
+    encoder.finish();
+
+    await new Promise((res, rej) => {
+        writeStream.on("close", res);
+        writeStream.on("error", rej);
+    });
+
+    console.log("Gif was created.");
 }
 
 export async function handleSchedule(ctx: Context, input: {[key: string]: any}) {

@@ -25,8 +25,8 @@ export class Area {
         this.type = type;
 
         if(type=="rectangle" && data.length > 0) {
-            this.width  = Math.abs(data[0][0] - data[1][0]);
-            this.height = Math.abs(data[0][1] - data[1][1]);
+            this.width  = Math.abs(data[0][0] - data[1][0]) + 1;
+            this.height = Math.abs(data[0][1] - data[1][1]) + 1;
         } else if(type=="polygon") {
             const xs = data.map(p => p[0]);
             const ys = data.map(p => p[1]);

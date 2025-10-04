@@ -95,7 +95,7 @@ export async function downloadFileWithRetry(url) {
 
 export function pathToDate(p) {
   const [year, month, day, hour, minute] = p.trim().split(/\/+/);
-  return new Date(month-1, day, year, hour, minute);
+  return new Date(year, month - 1, day, hour, minute);
 }
 
 export function pathToFormatted(p) {

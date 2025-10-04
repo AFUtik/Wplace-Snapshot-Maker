@@ -30,7 +30,8 @@ const commands = {
   show: cmd.handleShow,
   limit: cmd.handleLimit,
   image: cmd.handleImage,
-  schedule: cmd.handleSchedule
+  schedule: cmd.handleSchedule,
+  gif: cmd.handleGif
 }
 
 
@@ -76,18 +77,6 @@ function tileToPixel(z, x, y) {
   return { px, py, scale };
 }
 
-function normalizeCorners(p1, p2) {
-  const xMin = Math.min(p1[0], p2[0]);
-  const yMin = Math.max(p1[1], p2[1]);
-  const xMax = Math.max(p1[0], p2[0]);
-  const yMax = Math.min(p1[1], p2[1]);
-
-  return [
-    [xMin, yMin],
-    [xMax, yMax]
-  ];
-}
-
 app.use(express.json());
 
 app.use(express.static(path.join(process.cwd(), 'public')));
@@ -125,7 +114,7 @@ app.get('/dates', async (req, res) => {
 app.get('/loadByName/:name', async (req, res) => {
   const name = req.params.name;
 
-  await commands.load(
+  const snapshot = await commands.load(
     context, {
       args:   ['load', name, ""],
       flags:  [],
@@ -133,7 +122,10 @@ app.get('/loadByName/:name', async (req, res) => {
     }
   );
 
-  res.json({ status: "ok", received: req.body });
+  res.json({ status: "ok", received: req.body, snapshot: {
+    name: snapshot.name,
+    date: utils.pathToFormatted(snapshot.date)
+  } });
 });
 
 app.post('/loadByDate', async (req, res) => {
@@ -141,7 +133,7 @@ app.post('/loadByDate', async (req, res) => {
 
   const date = req.body.date;
 
-  await commands.load(
+  const snapshot = await commands.load(
     context, {
       args:   ['load', context.snapshot.name, utils.formattedToPath(date)],
       flags:  [],
@@ -149,8 +141,27 @@ app.post('/loadByDate', async (req, res) => {
     }
   );
   
+  res.json({ status: "ok", received: req.body, snapshot: {
+    name: snapshot.name,
+    date: date
+  } });
+});
+
+app.post('/load', async (req, res) => {
+  const name = req.body.name;
+  const date = utils.formattedToPath(req.body.date);
+  
+  await commands.load(
+    context, {
+      args:   ['load', name, date],
+      flags:  [],
+      params: {}
+    }
+  );
+  
   res.json({ status: "ok", received: req.body });
 });
+
 
 app.get('/create/:name', async (req, res) => {
   try {
@@ -291,9 +302,15 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
 });
 
 app.post('/points/rectangle', async (req, res) => {
-  const { tileX0, tileY0, tileX1, tileY1 } = req.body;
+  const p1 = req.body.points[0];
+  const p2 = req.body.points[0];
 
-  context.selection = new Area(normalizeCorners([tileX0, tileY0], [tileX1, tileY1]), "rectangle");
+  const xMin = Math.min(p1[0], p2[0]);
+  const yMin = Math.max(p1[1], p2[1]);
+  const xMax = Math.max(p1[0], p2[0]);
+  const yMax = Math.min(p1[1], p2[1]);
+
+  context.selection = new Area([[xMin, yMin], [xMax, yMax]], "rectangle");
 
   res.json({ status: "ok", received: req.body });
 })
