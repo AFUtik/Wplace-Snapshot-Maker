@@ -279,6 +279,27 @@ crt_btn.addEventListener("click", async () => {
     }
 });
 
+const dateFrom_sel = document.getElementById("dateFromSelect");
+const dateTo_sel = document.getElementById("dateToSelect");
+
+dateFrom_sel.addEventListener("mousedown", async () => {
+    let query = "dates";
+    if(dateTo_sel.options[0].text !== "Empty") {
+        
+    }
+
+    await updateList(dateFrom_sel, "snapshots") 
+})
+
+dateFrom_sel.addEventListener("mousedown", async () => {
+   await updateList(dateTo_sel, "snapshots") 
+})
+
+const gifBtn = document.getElementById("gifBtn");
+gitBtn.addEventListener("click", async () => {
+
+})
+
 async function loadSnapshot() {
     const savedSnapshot = localStorage.getItem('snapshot');
     if(savedSnapshot) {

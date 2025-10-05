@@ -111,6 +111,28 @@ app.get('/dates', async (req, res) => {
   res.json({"items": dates.map(d => utils.dateToFormatted(d))})
 });
 
+app.post('/dates/after', async (req, res) => {
+  if(!context.snapshot.name) return;
+
+  const after = req.params.after;
+  
+  const dates = await cmd.getSnapshotChanges(context.snapshot, "-d");
+  const filtered = dates.filter(d => d >= after);
+  
+  res.json({"items": filtered.map(d => utils.dateToFormatted(d))})
+});
+
+app.post('/dates/before', async (req, res) => {
+  if(!context.snapshot.name) return;
+  
+  const before = req.params.after;
+  
+  const dates = await cmd.getSnapshotChanges(context.snapshot, "-d");
+  const filtered = dates.filter(d => d <= before);
+  
+  res.json({"items": filtered.map(d => utils.dateToFormatted(d))})
+});
+
 app.get('/loadByName/:name', async (req, res) => {
   const name = req.params.name;
 
@@ -303,14 +325,14 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
 
 app.post('/points/rectangle', async (req, res) => {
   const p1 = req.body.points[0];
-  const p2 = req.body.points[0];
+  const p2 = req.body.points[1];
 
   const xMin = Math.min(p1[0], p2[0]);
-  const yMin = Math.max(p1[1], p2[1]);
+  const yMin = Math.min(p1[1], p2[1]);
   const xMax = Math.max(p1[0], p2[0]);
-  const yMax = Math.min(p1[1], p2[1]);
+  const yMax = Math.max(p1[1], p2[1]);
 
-  context.selection = new Area([[xMin, yMin], [xMax, yMax]], "rectangle");
+  context.selection = new Area([[xMin, yMax], [xMax, yMin]], "rectangle");
 
   res.json({ status: "ok", received: req.body });
 })
