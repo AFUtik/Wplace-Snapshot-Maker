@@ -49,6 +49,26 @@
   <button id="crtBtn" style="position:absolute; padding-top: 10px; padding-bottom: 12px; top:22px; left:640px; z-index:2;">Create</button>
   <input id="snapshotInput" style="position:absolute; padding-top: 10px; padding-bottom: 12px; top:22px; left:700px; z-index:2;"></input>
 
+  
+  <button class="tooltip" id="gifBtn" style="position:absolute; padding-top: 10px; padding-bottom: 12px; top:22px; right:200px; z-index:2;">
+    <span  class="tooltiptext">You must select the region of your snapshot, then choose a range of dates.</span>
+    Create GIF
+  </button>
+
+  <div style="position:absolute; padding-top: 10px; padding-bottom: 12px; top:15px; right:120px; z-index:2; overflow-y: 5;">
+    <span style="background-color: gray; font-family: 'Courier New', Courier, monospace;">From:</span><br>
+    <select id="dateFromSelect">
+      <option>Empty</option>
+    </select>
+  </div>
+
+  <div style="position:absolute; padding-top: 10px; padding-bottom: 12px; top:15px; right:30px; z-index:2; overflow-y: 5;">
+    <span style="background-color: gray; font-family: 'Courier New', Courier, monospace;">To:</span><br>
+    <select id="dateToSelect">
+      <option>Empty</option>
+    </select>
+  </div>
+
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.8.0/dist/leaflet.css"
