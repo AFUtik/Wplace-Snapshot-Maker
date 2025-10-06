@@ -165,7 +165,7 @@ export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}
     const snapshot: Snapshot = new Snapshot(name, "", new Area([]));
     await snapshot.fetchMeta();
 
-    if(!ctx.selection.empty()) snapshot.area = ctx.selection;
+    if(input.flags.includes('-select')) snapshot.area = ctx.selection;
 
     const meta = snapshot.meta;
 
@@ -332,7 +332,7 @@ export async function handleLimit(ctx: Context, input: {[key: string]: any}) {
 export async function handleImage(ctx: Context, input: {[key: string]: any}) {
     const [, img_name] = input.args;
     
-    const canvas = createCanvas((ctx.selection.width+1)*1000, (ctx.selection.height+1)*1000);
+    const canvas = createCanvas((ctx.selection.width-1)*1000, (ctx.selection.height-1)*1000);
     const __ctx = canvas.getContext('2d');
 
     const tiles: number[][] = await ctx.selection.getXY();
@@ -399,13 +399,16 @@ export async function handleGif(ctx: Context, input: {[key: string]: any}) {
     encoder.setQuality(10);
 
     let prevFrameBuffer = null;
-    const useFrameDedup = true;
+
+    const useFrameDedup  = true;
+    const skipEmptyFrame = true;
 
     for(const date of filtered_dates) {
-        __ctx.fillStyle = "#ffffff";
+        __ctx.fillStyle = "#ffffffff";
         __ctx.fillRect(0, 0, width, height);
 
         const folderPath = `data/snapshots/${ctx.snapshot.name}/${utils.dateToPath(date)}/`
+        let success = true;
         for(const [cx, cy] of gridXY) {
             try {
                 const buffer = await fs.readFile(folderPath+`${cx}_${cy}.png`)
@@ -413,9 +416,12 @@ export async function handleGif(ctx: Context, input: {[key: string]: any}) {
                 
                 __ctx.drawImage(img, (cx - tlx0) * 1000, (cy - tly1) * 1000);
             } catch(e) {
-                continue;
+                success = false;
+                break;
             }
         }
+
+        if(!success) continue;
 
         const loadPromises = tileOffsets.map(async (t) => {
             const p = folderPath + t.name;
@@ -430,19 +436,32 @@ export async function handleGif(ctx: Context, input: {[key: string]: any}) {
 
         const images = await Promise.all(loadPromises);
         for (const it of images) {
-        if (!it) continue;
+            if (!it) continue;
             __ctx.drawImage(it.img, it.x, it.y);
+        }
+        const imageData = __ctx.getImageData(0, 0, width, height)
+
+        if (skipEmptyFrame) {
+            const buf = new Uint32Array(imageData.data.buffer);
+            let empty = true;
+
+            for (let i = 0; i < buf.length; i++) {
+                if (buf[i] !== 0) {
+                    empty = false;
+                    break;
+                }
+            }
+            if(empty) continue;
         }
 
         if (useFrameDedup) {
-            const imageData = __ctx.getImageData(0, 0, width, height);
             const buf = Buffer.from(imageData.data.buffer);
 
             if (prevFrameBuffer && Buffer.compare(prevFrameBuffer, buf) === 0) {
                 continue;
             }
             prevFrameBuffer = buf;
-            encoder.addFrame(buf);
+            encoder.addFrame(__ctx);
         } else encoder.addFrame(__ctx);
     }
     encoder.finish();

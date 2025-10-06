@@ -114,23 +114,23 @@ app.get('/dates', async (req, res) => {
 app.post('/dates/after', async (req, res) => {
   if(!context.snapshot.name) return;
 
-  const after = req.params.after;
+  const after = utils.formattedToDate(req.body.after);
   
   const dates = await cmd.getSnapshotChanges(context.snapshot, "-d");
   const filtered = dates.filter(d => d >= after);
   
-  res.json({"items": filtered.map(d => utils.dateToFormatted(d))})
+  res.json({"dates": filtered.map(d => utils.dateToFormatted(d))})
 });
 
 app.post('/dates/before', async (req, res) => {
   if(!context.snapshot.name) return;
   
-  const before = req.params.after;
+  const before = utils.formattedToDate(req.body.before);
   
   const dates = await cmd.getSnapshotChanges(context.snapshot, "-d");
   const filtered = dates.filter(d => d <= before);
   
-  res.json({"items": filtered.map(d => utils.dateToFormatted(d))})
+  res.json({"dates": filtered.map(d => utils.dateToFormatted(d))})
 });
 
 app.get('/loadByName/:name', async (req, res) => {
@@ -190,7 +190,7 @@ app.get('/create/:name', async (req, res) => {
     const newSnapshot = await commands.snapshot(
       context, {
         args:   ['snapshot', req.params.name],
-        flags:  ['-s'],
+        flags:  ['-select', '-s'],
         params: []
       }
     );
@@ -203,10 +203,11 @@ app.get('/create/:name', async (req, res) => {
 });
 
 app.get('/update', async (req, res) => {
+  if(!context.snapshot.name) return;
   try {
     const newSnapshot = await commands.snapshot(
       context, {
-        args:   ['snapshot', context.SNAPSHOT_NAME],
+        args:   ['snapshot', context.snapshot.name],
         flags:  ['-s'],
         params: []
       }
@@ -228,6 +229,23 @@ app.get('/delete', async (req, res) => {
   await commands.delete(
     context, {
       args:   ['delete', context.snapshot.name, context.snapshot.date],
+      flags:  [],
+      params: {}
+    }
+  );
+  
+  res.json({ status: "ok", received: req.body });
+});
+
+app.post("/createGif", async (req, res) => {
+  if(!context.snapshot.name) {
+    console.log("Snapshot not chosen.");
+    return;
+  }
+
+  await commands.gif(
+    context, {
+      args:   ['gif', context.snapshot.name, req.body.delay, utils.formattedToPath(req.body.from), utils.formattedToPath(req.body.to)],
       flags:  [],
       params: {}
     }
