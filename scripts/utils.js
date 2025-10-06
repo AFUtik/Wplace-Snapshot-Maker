@@ -108,6 +108,11 @@ export function formattedToPath(p) {
   return `${year}/${month}/${day}/${hour}/${minute}`;
 }
 
+export function formattedToDate(p) {
+  const [month, day, year, hour, minute] = p.trim().split(/[\:-\s/]+/);
+  return new Date(year, month - 1, day, hour, minute);
+}
+
 export function dateToPath(d) {
   return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}/${String(d.getHours()).padStart(2,'0')}/${String(d.getMinutes()).padStart(2,'0')}`
 }

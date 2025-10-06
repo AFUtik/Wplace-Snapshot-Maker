@@ -97,7 +97,7 @@ async function initMap() {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
-                        points: [[x0, y0], [x1, y1]]
+                        points: [[x0, y0], [Math.floor(Math.max(px_coords0.x, px_coords1.x)), Math.floor(Math.max(px_coords0.y, px_coords1.y))]]
                     })
                 }).then(res => res.json())
                     .then(data => console.log("Response:", data))
@@ -184,6 +184,21 @@ async function updateList(select, query, firstEl="<option disabled selected>Sele
     });
 }
 
+function fillOptions(selectElem, dates) {
+    if (!dates || !dates.length) {
+        const option = document.createElement("option");
+        option.text = "Empty";
+        selectElem.appendChild(option);
+        return;
+    }
+
+    for (const date of dates) {
+        const option = document.createElement("option");
+        option.text = date;
+        selectElem.appendChild(option);
+    }
+}
+
 const sel_sel = document.getElementById("selectionSelect");
 sel_sel.addEventListener("change", async () => {
   SELECTION_TYPE = sel_sel.options[sel_sel.selectedIndex].text.toLowerCase();
@@ -245,7 +260,7 @@ upd_btn.addEventListener("click", async () => {
         const response = await fetch(`/update`);
         const result =  await response.json();
 
-        date_sel.options[0].value = result.date;
+        date_sel.value = result.date;
         await updateList(date_sel, "dates");
         console.log("Response:", result);
     } catch (err) {
@@ -283,21 +298,51 @@ const dateFrom_sel = document.getElementById("dateFromSelect");
 const dateTo_sel = document.getElementById("dateToSelect");
 
 dateFrom_sel.addEventListener("mousedown", async () => {
-    let query = "dates";
-    if(dateTo_sel.options[0].text !== "Empty") {
-        
+    dateFrom_sel.innerHTML = "";
+
+    if (dateTo_sel.options.length && dateTo_sel.value !== "Empty") {
+        const response = await fetch(`/dates/before`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ before: dateTo_sel.value })
+        });
+
+        const result = await response.json();
+        fillOptions(dateFrom_sel, result.dates);
+    } else {
+        await updateList(dateFrom_sel, "dates");
     }
+});
 
-    await updateList(dateFrom_sel, "snapshots") 
-})
+dateTo_sel.addEventListener("mousedown", async () => {
+    dateTo_sel.innerHTML = "";
 
-dateFrom_sel.addEventListener("mousedown", async () => {
-   await updateList(dateTo_sel, "snapshots") 
-})
+    console.log(dateFrom_sel.options)
 
+    if (dateFrom_sel.options.length && dateFrom_sel.value !== "Empty") {
+        const response = await fetch(`/dates/after`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ after: dateFrom_sel.value })
+        });
+
+        const result = await response.json();
+        fillOptions(dateTo_sel, result.dates);
+    } else {
+        await updateList(dateTo_sel, "dates");
+    }
+});
+
+const delayInput = document.getElementById("delayInput");
 const gifBtn = document.getElementById("gifBtn");
-gitBtn.addEventListener("click", async () => {
+gifBtn.addEventListener("click", async () => {
+    if(dateFrom_sel.value === "Empty" && dateTo_sel === "Empty") return;
 
+    const response = await fetch(`/createGif`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ delay: Number(delayInput.value), from: dateFrom_sel.value, to: dateTo_sel.value })
+    });
 })
 
 async function loadSnapshot() {
