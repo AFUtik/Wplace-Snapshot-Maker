@@ -8,6 +8,8 @@ import path from "path";
 import { createCanvas, Image, loadImage } from 'canvas';
 import { SNAPSHOTS_DIR, Area, Snapshot, Context } from './context.ts';
 
+import * as dpng from "./dpng.js"
+
 import pkg from "gif-encoder-2";
 const GIFEncoder = pkg.default || pkg;
 
@@ -19,37 +21,6 @@ export async function getSnapshots() {
     for (const snapshot_folder of snapshots) names.push(snapshot_folder.name);
        
     return names;
-}
-
-export async function getSnapshotChanges(snapshot: Snapshot, flag: string = ""): Promise<any[]> {
-  const years: string[] = (await fs.readdir(snapshot.rootPath, { withFileTypes: true }))
-    .filter(d => d.isDirectory())
-    .map(d => d.name);
-  const dates: any[] = [];
-  
-  for (const year of years) {
-    const months = await fs.readdir(path.join(snapshot.rootPath, year));
-    for (const month of months) {
-      const days = await fs.readdir(path.join(snapshot.rootPath, year, month));
-      for (const day of days) {
-        const hours = await fs.readdir(path.join(snapshot.rootPath, year, month, day));
-        for (const hour of hours) {
-          const minutes = await fs.readdir(path.join(snapshot.rootPath, year, month, day, hour));
-          for (const minute of minutes) {
-            const d = new Date(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute));
-            dates.push(d);
-          }
-        }
-      }
-    }
-  }
-
-  if(flag == '-a' ) {         // ascend by date
-    dates.sort((a, b) => a - b);
-  } else if(flag == '-d') {   // descend by date
-    dates.sort((a, b) => b - a);
-  }
-  return dates;
 }
 
 interface GetSnapshotSizeOptions {
@@ -161,9 +132,12 @@ export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}
             return new Snapshot("");
         }
     }
-
     const snapshot: Snapshot = new Snapshot(name, "", new Area([]));
     await snapshot.fetchMeta();
+
+    const snapshotExists = await snapshot.exists();
+    const latestChange   = await snapshot.getLatestChange();
+    const latestSnapshot = new Snapshot(name, utils.dateToPath(latestChange), new Area([]));
 
     if(input.flags.includes('-select')) snapshot.area = ctx.selection;
 
@@ -186,11 +160,21 @@ export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}
         const batch = queue.splice(0, ctx.DOWNLOAD_LIMIT);
         await Promise.all(batch.map(async ([x, y]) => {
             try {
-                const tile_png = await utils.downloadFileWithRetry(`https://backend.wplace.live/files/s0/tiles/${x}/${y}.png`);
-                downloadSize += tile_png.length;
-                const tilePath = path.join(snapshot.fullPath, `${x}_${y}.png`);
-                await fs.writeFile(tilePath, tile_png);
-                console.log(`Saved tile: ${tilePath}`);
+                const downloadedTile = await utils.downloadFileWithRetry(`https://backend.wplace.live/files/s0/tiles/${x}/${y}.png`);
+                downloadSize += downloadedTile.length;
+
+                if(snapshotExists) {
+                    const latestTile = await fs.readFile(path.join(latestSnapshot.fullPath, `${x}_${y}.png`));
+
+                    const changes = dpng.getChanges(latestTile, downloadedTile, 1000, 1000);
+                    if(changes) {
+                        await dpng.writeDPNG(changes, 1000, 1000, `data/snapshots/${name}/delta/${snapshot.date}/${x}_${y}.dpng`);
+                    }
+                } else {
+                    await fs.writeFile(path.join(snapshot.fullPath, `${x}_${y}.png`), downloadedTile);
+                }
+                
+                console.log(`Saved tile '${x}_${y}'.png`);
             } catch (e: any) {
                 console.error(`Failed to load tile with tl X: ${x}, tl Y: ${y}:`, e.message);
             }

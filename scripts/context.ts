@@ -1,5 +1,7 @@
 import { LRUCache } from 'lru-cache';
 
+import fs from "fs/promises"
+import path from "path"
 import readline from "readline";
 import * as utils from './utils.js'
 
@@ -185,6 +187,41 @@ export class Snapshot {
     async exists(): Promise<boolean> {
         if(!await utils.folderExists(this.fullPath)) return false;
         return true;
+    }
+
+    async getAllChanges() {
+        const years: string[] = (await fs.readdir(this.rootPath, { withFileTypes: true }))
+            .filter(d => d.isDirectory())
+            .map(d => d.name);
+        const dates: any[] = [];
+          
+        for (const year of years) {
+          const months = await fs.readdir(path.join(this.rootPath, year));
+          for (const month of months) {
+            const days = await fs.readdir(path.join(this.rootPath, year, month));
+            for (const day of days) {
+              const hours = await fs.readdir(path.join(this.rootPath, year, month, day));
+              for (const hour of hours) {
+                const minutes = await fs.readdir(path.join(this.rootPath, year, month, day, hour));
+                for (const minute of minutes) {
+                  const d = new Date(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute));
+                  dates.push(d);
+                }
+              }
+            }
+          }
+        }
+        return dates;
+    }
+
+    async getLatestChange() {
+        const dates = await this.getAllChanges();
+        return new Date(Math.max(...dates));
+    }
+
+    async getFirstChange() {
+        const dates = await this.getAllChanges();
+        return new Date(Math.min(...dates));
     }
 }
 
