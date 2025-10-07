@@ -256,6 +256,10 @@ app.post("/createGif", async (req, res) => {
 
 const renderQueue = new PQueue({ concurrency: context.CONCURRENCY });
 
+async function loadTile() {
+  
+}
+
 app.get('/tiles/:z/:x/:y.png', async (req, res) => {
   const z = Number(req.params.z);
   const x = Number(req.params.x);

@@ -136,7 +136,6 @@ export class Snapshot {
     rootPath: string;
 
     meta: any;
-    
     area: Area;
     
     constructor(name: string, date: string = "", area: Area = new Area([[0, 0], [0, 0]])) {
@@ -146,8 +145,14 @@ export class Snapshot {
         this.area = area;
         this.meta = DEFAULT_META;
 
-        this.fullPath = `${SNAPSHOTS_DIR}/${name}/${date}`
-        this.rootPath = `${SNAPSHOTS_DIR}/${name}`
+        this.fullPath = `${SNAPSHOTS_DIR}/${name}/${date}`;
+        this.rootPath = `${SNAPSHOTS_DIR}/${name}`;
+    }
+
+    async loadTile(x: number, y: number) {
+
+            return await fs.readFile(`${this.fullPath}/${x}_${y}.png`)
+
     }
 
     async setDateNow() {
