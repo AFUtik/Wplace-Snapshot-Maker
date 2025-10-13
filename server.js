@@ -34,7 +34,6 @@ const commands = {
   gif: cmd.handleGif
 }
 
-
 let settings = await utils.readJson('data/settings.json')
 
 if (!settings || typeof settings !== 'object') {
@@ -295,12 +294,9 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
         let img_buf = context.IMAGE_BUFFER_CACHE.get(chunkKey);
         if (!img_buf) {
           try {
-            const p = `${context.snapshot.fullPath}/${cx}_${cy}.png`;
-            await fs.access(p);
-
-            img_buf = await fs.readFile(p);
+            img_buf = await context.snapshot.loadTile(cx, cy);
             context.IMAGE_BUFFER_CACHE.set(chunkKey, img_buf);
-          } catch (e) {
+          } catch {
             continue;
           }
         }

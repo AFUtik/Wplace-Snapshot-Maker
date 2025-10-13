@@ -4,15 +4,17 @@ import fs from "fs/promises"
 import path from "path"
 import readline from "readline";
 import * as utils from './utils.js'
+import { performance } from 'perf_hooks';
+
+import { SnapshotRepository, SnapshotEntity } from './sqlite.ts';
+import { readDPNG, DPNGFile } from './dpng.js';
+import sharp from "sharp";
 
 export const SNAPSHOTS_DIR = "data/snapshots";
 
 const DEFAULT_META: {[key: string]: any} = {
-    latest_date: "",
     area: [],
     area_type: 'rectangle',
-    limit: 0,
-    memory_cache: {}
 };
 
 export class Area {
@@ -128,31 +130,51 @@ export class Area {
     }
 }
 
+
 export class Snapshot {
+    id: number = 0;
+
     name: string;
     date: string;
+    size: number = 0;
 
     fullPath: string;
     rootPath: string;
 
-    meta: any;
-    area: Area;
-    
+    delta_from: Snapshot | null = null;
+    changed: number = 0;
+
     constructor(name: string, date: string = "", area: Area = new Area([[0, 0], [0, 0]])) {
         this.name = name;
-        this.date = date;
+        if(date) {
+            this.date = date;
+        } else {
+            const now = new Date();
+            this.date = `${now.getFullYear()}_${now.getMonth() + 1}_${now.getDate()}_${String(now.getHours()).padStart(2, '0')}_${String(now.getMinutes()).padStart(2, '0')}_${String(now.getSeconds()).padStart(2, '0')}`;
+        }
 
-        this.area = area;
-        this.meta = DEFAULT_META;
-
-        this.fullPath = `${SNAPSHOTS_DIR}/${name}/${date}`;
+        this.fullPath = `${SNAPSHOTS_DIR}/${name}/${this.date}`;
         this.rootPath = `${SNAPSHOTS_DIR}/${name}`;
     }
 
-    async loadTile(x: number, y: number) {
+    async loadTile(x: number, y: number): Promise<Buffer> {
+        if(this.delta_from !== null) {
+            const path_to_dpng = `${this.fullPath}/${x}_${y}.dpng`;
+            try {
+                await fs.access(path_to_dpng);
+            } catch  {
+                return await fs.readFile(`${this.delta_from.fullPath}/${x}_${y}.png`);
+            }
 
+            const start = performance.now();
+
+            const dpng: DPNGFile = await readDPNG(`${this.fullPath}/${x}_${y}.dpng`);
+            const org:  Buffer   = await fs.readFile(`${this.delta_from.fullPath}/${x}_${y}.png`);
+
+            return await dpng.apply(org);
+        } else {
             return await fs.readFile(`${this.fullPath}/${x}_${y}.png`)
-
+        }
     }
 
     async setDateNow() {
@@ -172,63 +194,83 @@ export class Snapshot {
         this.fullPath = `data/snapshots/${this.name}/${this.date}`;
     }
 
-    async readMeta() {
-        return await utils.readJson(`${SNAPSHOTS_DIR}/${this.name}/metadata.json`, {default: DEFAULT_META, createIfAbsent: true})
+    // Reads area info from metadata.json //
+    async readArea(): Promise<Area> { 
+        if(!await utils.folderExists(this.rootPath)) return new Area([]);
+
+        const meta = await utils.readJson(`${this.rootPath}/metadata.json`, {default: DEFAULT_META, createIfAbsent: true});
+
+        return new Area(meta.area, meta.area_type)
     }
 
-    async fetchMeta() { 
-        if(!await utils.folderExists(this.rootPath)) return;
-
-        const meta = await this.readMeta();
-
-        await this.setDatePath(meta.latest_date);
-        this.area = new Area(meta.area, meta.area_type)
+    async writeArea(wr_area: Area): Promise<void> {
+        await utils.writeJson(`${this.rootPath}/metadata.json`, {area: wr_area.data, area_type: wr_area.type});
     }
 
-    async writeMeta(meta: any) {
-        await utils.writeJson(`${SNAPSHOTS_DIR}/${this.name}/metadata.json`, meta)
-    }
-
+    // Checks a snapshot on disk //
     async exists(): Promise<boolean> {
         if(!await utils.folderExists(this.fullPath)) return false;
         return true;
     }
-
-    async getAllChanges() {
-        const years: string[] = (await fs.readdir(this.rootPath, { withFileTypes: true }))
-            .filter(d => d.isDirectory())
-            .map(d => d.name);
-        const dates: any[] = [];
-          
-        for (const year of years) {
-          const months = await fs.readdir(path.join(this.rootPath, year));
-          for (const month of months) {
-            const days = await fs.readdir(path.join(this.rootPath, year, month));
-            for (const day of days) {
-              const hours = await fs.readdir(path.join(this.rootPath, year, month, day));
-              for (const hour of hours) {
-                const minutes = await fs.readdir(path.join(this.rootPath, year, month, day, hour));
-                for (const minute of minutes) {
-                  const d = new Date(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute));
-                  dates.push(d);
-                }
-              }
-            }
-          }
-        }
-        return dates;
-    }
-
-    async getLatestChange() {
-        const dates = await this.getAllChanges();
-        return new Date(Math.max(...dates));
-    }
-
-    async getFirstChange() {
-        const dates = await this.getAllChanges();
-        return new Date(Math.min(...dates));
-    }
 }
+
+function mapEntityToSnapshot(entity: SnapshotEntity): Snapshot | null {
+    if(!entity) return null;
+    
+    const snapshot: Snapshot = new Snapshot(entity.name, utils.formattedToPath(entity.created_at));
+    snapshot.id   = entity.id;
+    snapshot.size = entity.size;
+    
+    if(entity.delta_from !== null) {
+        snapshot.delta_from = mapEntityToSnapshot(SnapshotRepository.getById(entity.delta_from));
+        snapshot.changed    = entity.changed;
+    }
+
+    return snapshot;
+}
+
+function mapSnapshotToEntity(snapshot: Snapshot): SnapshotEntity {
+    const entity = new SnapshotEntity();
+    entity.name  = snapshot.name;
+    entity.size  = snapshot.size;
+    
+    if(snapshot.delta_from !== null) {
+        entity.delta_from = snapshot.delta_from.id;
+        entity.changed    = snapshot.changed;
+    }
+
+    entity.created_at = utils.pathToFormatted(snapshot.date);
+    return entity;
+}
+
+export class SnapshotService {
+    static findSnapshotByName(name: string) {
+        return mapEntityToSnapshot(SnapshotRepository.getLatestSnapshot(
+            name
+        ));
+    }
+
+    static findSourceSnapshotByName(name: string) {
+        return mapEntityToSnapshot(SnapshotRepository.getLatestSourceSnapshot(
+            name
+        ));
+    }
+
+    static findSnapshot(name: string, date: string) {
+        return mapEntityToSnapshot(SnapshotRepository.getSnapshot(
+            name, utils.pathToDate(date)
+        ));
+    }
+
+    static createSnapshot(snapshot: Snapshot) {
+        if(snapshot.delta_from !== null) {
+            SnapshotRepository.createDeltaSnapshot(mapSnapshotToEntity(snapshot));
+        } else {
+            SnapshotRepository.createSourceSnapshot(mapSnapshotToEntity(snapshot));
+        }
+    }
+};
+
 
 export class Context {
     rl: readline.Interface;

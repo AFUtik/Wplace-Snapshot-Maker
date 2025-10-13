@@ -6,93 +6,19 @@ import fsc from 'fs';
 import path from "path";
 
 import { createCanvas, Image, loadImage } from 'canvas';
-import { SNAPSHOTS_DIR, Area, Snapshot, Context } from './context.ts';
+import { SNAPSHOTS_DIR, Area, Snapshot, Context, SnapshotService } from './context.ts';
 
 import * as dpng from "./dpng.js"
 
 import pkg from "gif-encoder-2";
 const GIFEncoder = pkg.default || pkg;
 
-// operations with snapshot //
-
-export async function getSnapshots() {
-    let names = [];
-    const snapshots = await fs.readdir("data/snapshots", { withFileTypes: true });
-    for (const snapshot_folder of snapshots) names.push(snapshot_folder.name);
-       
-    return names;
-}
-
-interface GetSnapshotSizeOptions {
-  metaIn?: any | null;
-  date?: string;
-}
-
-async function getSnapshotSize(snapshot: Snapshot, options: GetSnapshotSizeOptions = {date: "", metaIn: null}) : Promise<number> {
-  const meta = await snapshot.readMeta();
-
-  const queue: {path: string, depth: number}[] = [{ path: `${SNAPSHOTS_DIR}/${snapshot.name}/${options.date}`, depth: 0 }];
-  const resultFolders: string[] = [];
-
-  while (queue.length) {
-    const { path: currentPath, depth } = queue.shift()!;
-
-    if (depth === 5) {
-      resultFolders.push(currentPath);
-      continue;
-    }
-
-    try {
-      const entries = await fs.readdir(currentPath, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isDirectory()) {
-          queue.push({ path: path.join(currentPath, entry.name), depth: depth + 1 });
-        }
-      }
-    } catch (err) {
-      console.error('Error reading folder:', currentPath, err);
-    }
-  }
-  
-  let totalSize = 0;
-
-  for(const folderPath of resultFolders) {
-    if(meta && folderPath in meta.memory_cache) {
-      totalSize+=meta.memory_cache[folderPath];
-      continue;
-    }
-
-    const tiles = await fs.readdir(folderPath);
-    let snapshotSize = 0;
-
-    for (const tile of tiles) {
-      const stats = await fs.stat(path.join(folderPath, tile));
-      snapshotSize += stats.size;
-    }
-
-    meta.memory_cache[folderPath] = snapshotSize;
-
-    totalSize += snapshotSize;
-  }
-
-  if(!options.metaIn) await snapshot.writeMeta(meta);
-
-  return totalSize;
-}
-
 // Commands //
 
 export async function handleLoad(ctx: Context, input: {[key: string]: any}): Promise<Snapshot> {
     let [, name, date] = input.args as [string, string, string]; 
     if(name == ctx.snapshot.name && date == ctx.snapshot.date) return ctx.snapshot;
-
-    const snapshot: Snapshot = new Snapshot(name, date);
-    if(!await snapshot.exists()) {
-        console.log("Snapshot not found.")
-        return new Snapshot("");
-    }
-    await snapshot.fetchMeta();
-
+    
     if (!name) {
         if (!ctx.snapshot.name) name = ctx.snapshot.name;
         else {
@@ -101,24 +27,24 @@ export async function handleLoad(ctx: Context, input: {[key: string]: any}): Pro
         }
     }
 
-    if (date) {
-        const parts = (date || "").trim().split(/[-:\s/]+/).map(Number);
-        const [year, month, day, hour = 0, minute = 0] = parts;
-
-        const after = new Date(year, month - 1, day, hour, minute);
-        const dates = await getSnapshotChanges(snapshot);
-
-        const candidates = dates.filter(d => d >= after);
-
-        await snapshot.setDate(candidates[0]);
+    let snapshot: Snapshot | null = null;
+    if(name && date) {
+        snapshot = SnapshotService.findSnapshot(name, date);
+    } else {
+        snapshot = SnapshotService.findSnapshotByName(name);
     }
 
-    // Saves to settings 
+    if(snapshot) {
+        await ctx.changeSnapshot(snapshot);
+        console.log(`Snapshot was succefully loaded. The current snapshot is ${name}[${utils.pathToFormatted(snapshot.date)}].`)
+        
+        return snapshot;
+    } else {
+        console.log("Snapshot not found");
 
-    await ctx.changeSnapshot(snapshot);
-    console.log(`Snapshot was succefully loaded. The current snapshot is ${name}[${utils.pathToFormatted(snapshot.date)}].`)
-
-    return snapshot;
+        return new Snapshot("");
+    }
+    
 }
 
 export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}): Promise<Snapshot> {
@@ -132,28 +58,18 @@ export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}
             return new Snapshot("");
         }
     }
-    const snapshot: Snapshot = new Snapshot(name, "", new Area([]));
-    await snapshot.fetchMeta();
 
-    const snapshotExists = await snapshot.exists();
-    const latestChange   = await snapshot.getLatestChange();
-    const latestSnapshot = new Snapshot(name, utils.dateToPath(latestChange), new Area([]));
+    let snapshot: Snapshot = new Snapshot(name); // New snapshot //
+    let latest_snapshot: Snapshot | null = SnapshotService.findSourceSnapshotByName(name);
 
-    if(input.flags.includes('-select')) snapshot.area = ctx.selection;
+    if(latest_snapshot) snapshot.delta_from = latest_snapshot;
+    
+    let area: Area = await snapshot.readArea();
+    if(input.flags.includes('-select') || area.empty()) area = ctx.selection;
 
-    const meta = snapshot.meta;
-
-    await snapshot.setDateNow();
     await fs.mkdir(snapshot.fullPath, {recursive: true});
 
-    let limit = meta.limit;
-
-    const limitParam = input.params.find(p => p.key === 'limit');
-    if (limitParam) {
-        limit = Number(limitParam.value) * 1024 * 1024; // converts megabytes into bytes.
-    }
-
-    const queue: number[][] = await snapshot.area.getXY();
+    const queue: number[][] = await area.getXY();
 
     let downloadSize = 0;
     while (queue.length > 0) {
@@ -163,14 +79,16 @@ export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}
                 const downloadedTile = await utils.downloadFileWithRetry(`https://backend.wplace.live/files/s0/tiles/${x}/${y}.png`);
                 downloadSize += downloadedTile.length;
 
-                if(snapshotExists) {
-                    const latestTile = await fs.readFile(path.join(latestSnapshot.fullPath, `${x}_${y}.png`));
+                if(latest_snapshot !== null) {
+                    // DELTA //
+                    const latestTile = await fs.readFile(path.join(latest_snapshot.fullPath, `${x}_${y}.png`));
 
-                    const changes = dpng.getChanges(latestTile, downloadedTile, 1000, 1000);
-                    if(changes) {
-                        await dpng.writeDPNG(changes, 1000, 1000, `data/snapshots/${name}/delta/${snapshot.date}/${x}_${y}.dpng`);
+                    const changes = await dpng.getChanges(latestTile, downloadedTile, 1000, 1000);
+                    if(changes.length > 0) {
+                        await dpng.writeDPNG(changes, 1000, 1000, `${snapshot.fullPath}/${x}_${y}.dpng`);
                     }
                 } else {
+                    // SOURCE //
                     await fs.writeFile(path.join(snapshot.fullPath, `${x}_${y}.png`), downloadedTile);
                 }
                 
@@ -181,8 +99,10 @@ export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}
         }));
         await utils.sleep(ctx.DOWNLOAD_COOLDOWN);
     }
+    snapshot.size = downloadSize;
 
-    if (limit != 0) {
+    // TO DO //
+    /*if (limit != 0) {
         const sizeBefore = await getSnapshotSize(snapshot);
         let newSize = sizeBefore + downloadSize;
 
@@ -212,20 +132,17 @@ export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}
             }
         }
 
-    }
+    }*/
+   
     console.log("All tiles saved successfully!");
+    await snapshot.writeArea(area);
 
-    meta.latest_date = snapshot.date;
-    meta.area = snapshot.area.data;
-    meta.area_type = snapshot.area.type;
-    meta.limit  = limit;
-
-    await utils.writeJson(`data/snapshots/${name}/metadata.json`, meta);
+    // Saving data to database. //
+    SnapshotService.createSnapshot(snapshot);
 
     if (input.flags.includes('-s') || input.flags.includes('-switch')) {
         await ctx.changeSnapshot(snapshot);
     }
-
     return snapshot;
 }
 
@@ -235,9 +152,14 @@ export async function handleDelete(ctx: Context, input: {[key: string]: any}) {
         console.log("Name not specified.");
         return;
     }
-    const snapshot: Snapshot = new Snapshot(name, date);
-
-    if(await snapshot.exists()) {
+    let snapshot: Snapshot | null = null;
+    if(name && date) {
+        snapshot = SnapshotService.findSnapshot(name, date);
+    } else {
+        snapshot = SnapshotService.findSnapshotByName(name);
+    }
+    
+    if(snapshot && await snapshot.exists()) {
         const stat = await fs.stat(snapshot.fullPath);
         if (stat.isDirectory()) {
             await fs.rm(snapshot.fullPath, { recursive: true, force: true });
@@ -253,11 +175,13 @@ export async function handleDelete(ctx: Context, input: {[key: string]: any}) {
 
 export async function handleMemory(ctx: Context, input: {[key: string]: any}) {
     const [, name] = input.args as [string, string];
-    const snapshot: Snapshot = new Snapshot(name);
-
     if (name) {
-        const snapshotSize = await getSnapshotSize(snapshot);
-        console.log(`${name} - ${(snapshotSize / (1024 * 1024)).toFixed(2)} mb`);
+        const snapshot: Snapshot | null = SnapshotService.findSnapshotByName(name);
+        if(!snapshot) {
+            console.log("Snapshot not found")
+            return;
+        }
+        console.log(`${name} - ${(snapshot.size / (1024 * 1024)).toFixed(2)} mb`);
     } else {
         let total = 0;
 

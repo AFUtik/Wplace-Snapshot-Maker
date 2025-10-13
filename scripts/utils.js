@@ -93,23 +93,38 @@ export async function downloadFileWithRetry(url) {
 
 // Dates //
 
+export function getLocalDateTime() {
+    const now = new Date();
+    const pad = (n) => n.toString().padStart(2, "0");
+    return `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} `
+         + `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+}
+
 export function pathToDate(p) {
   const [year, month, day, hour, minute] = p.trim().split(/\/+/);
   return new Date(year, month - 1, day, hour, minute);
 }
 
 export function pathToFormatted(p) {
-  const [year, month, day, hour, minute] = p.trim().split(/\/+/);
-  return `${month}/${day}/${year}-${hour}:${minute}`;
+  const parts = p.trim().split(/[\:_\-\s/]+/); // добавлен "_"
+
+  if (parts.length < 6) {
+    console.warn("Invalid format:", p);
+    return "0000-00-00 00:00:00";
+  }
+
+  const [year, month, day, hour, minute, seconds] = parts;
+
+  return `${year}-${month}-${day} ${hour}:${minute}:${seconds}`;
 }
 
 export function formattedToPath(p) {
-  const [month, day, year, hour, minute] = p.trim().split(/[\:-\s/]+/);
-  return `${year}/${month}/${day}/${hour}/${minute}`;
+  const [year, month, day, hour, minute, seconds] = p.trim().split(/[\:-\s/]+/);
+  return `${year}_${month}_${day}_${hour}_${minute}_${seconds}`;
 }
 
 export function formattedToDate(p) {
-  const [month, day, year, hour, minute] = p.trim().split(/[\:-\s/]+/);
+  const [month, day, year, hour, minute,] = p.trim().split(/[\:-\s/]+/);
   return new Date(year, month - 1, day, hour, minute);
 }
 

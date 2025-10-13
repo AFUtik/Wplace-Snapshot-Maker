@@ -1,6 +1,6 @@
-import sharp from "sharp";
 import fs from "fs/promises"
 import zlib from "zlib"
+import sharp from "sharp";
 
 const indexedPallette = {
   0: 0,
@@ -134,36 +134,62 @@ const indexedPalletteInv = [
   4294967295
 ]
 
-class DPNGFile {
+async function pngBufferToUint32Array(pngBuffer) {
+  const { data, info } = await sharp(pngBuffer)
+    .raw()
+    .ensureAlpha()
+    .toBuffer({ resolveWithObject: true });
+
+  const uint32 = new Uint32Array(data.buffer, data.byteOffset, data.length >> 2);
+  return { uint32, width: info.width, height: info.height };
+}
+
+async function uint32ArrayToPNGBuffer(buf32, width, height) {
+  return await sharp(new Uint8Array(buf32.buffer), {
+    raw: {
+      width,
+      height,
+      channels: 4
+    }
+  }).png().toBuffer();
+}
+
+export class DPNGFile {
   #data;
 
-  constructor(data, width, height, count, source) {
+  constructor(data, width, height, count) {
     this.data = data;
     this.width  = width;
     this.height = height;
     this.count  = count;
-    this.source = source;
   }
 
-  async applyDPNG(image) {
-    const payload = zlib.inflateSync(this.data);
+  async apply(image) {
+    try {
+      const { uint32: buf32, width, height } = await pngBufferToUint32Array(image);
+      const payload = zlib.inflateSync(this.data);
 
-    const data32 = new Uint32Array(image.buffer, image.byteOffset, image.length >> 2);
-    let i = 0, prevIdx = 0;
+      let i = 0, prevIdx = 0;
 
-    for (let n = 0; n < this.count; n++) {
-      let delta = payload[i++];
-      if (delta === 0xFF) {
-        delta = payload[i] | (payload[i+1]<<8) | (payload[i+2]<<16) | (payload[i+3]<<24);
-        i += 4;
+      for (let n = 0; n < this.count; n++) {
+          let delta = payload[i++];
+          if (delta === 0xFF) {
+              delta = payload[i] | (payload[i+1] << 8) | (payload[i+2] << 16) | (payload[i+3] << 24);
+              i += 4;
+          }
+
+          const idx = prevIdx + delta;
+          const color = indexedPalletteInv[payload[i++]];
+
+          buf32[idx] = color;
+          prevIdx = idx;
       }
 
-      const idx = prevIdx + delta;
-      const color = indexedPalletteInv[payload[i++]];
-
-      data32[idx] = color;
-      prevIdx = idx;
+      return await uint32ArrayToPNGBuffer(buf32, width, height);
+    } catch (e) {
+      console.log(e);
     }
+    
   }
 
   async getImage() {
@@ -186,30 +212,34 @@ class DPNGFile {
       data32[idx] = color;
       prevIdx = idx;
     }
-    return image;
+    return await uint32ArrayToPNGBuffer(data32, this.width, this.height);
   }
 }
 
 export async function getChanges(imgA, imgB, width, height) {
-  const a32 = new Uint32Array(imgA.buffer, imgA.byteOffset, imgA.byteLength >> 2);
-  const b32 = new Uint32Array(imgB.buffer, imgB.byteOffset, imgB.byteLength >> 2);
+  try {
+    const { uint32: a32 } = await pngBufferToUint32Array(imgA);
+    const { uint32: b32 } = await pngBufferToUint32Array(imgB);
 
-  const changes = [];
+    const changes = [];
 
-  for (let i = 0; i < a32.length; i++) {
-    const color = b32[i];
-    if (a32[i] !== color) {
-      const x = i % width;
-      const y = (i / width) | 0;
-      const idx = y * width + x;
+    for (let i = 0; i < a32.length; i++) {
+      const color = b32[i];
+      if (a32[i] !== color) {
+        const x = i % width;
+        const y = (i / width) | 0;
+        const idx = y * width + x;
 
-      changes.push({idx, color: indexedPallette[color]});
+        changes.push({idx, color: indexedPallette[color]});
+      }
     }
+    return changes;
+  } catch (e) {
+    console.log(e);
   }
-  return changes;
 }
 
-export async function writeDPNG(changes, width, height, date, path) {
+export async function writeDPNG(changes, width, height, path) {
   const payload = [];
   let prevIdx = 0;
 
@@ -229,25 +259,25 @@ export async function writeDPNG(changes, width, height, date, path) {
   }
 
   const buf = Buffer.from(payload);
-  const compressed = zlib.deflateSync(buf, { level: 8 });
+  const compressed = zlib.deflateSync(buf, { level: 5 });
 
-  const header = Buffer.alloc(32);
+  const header = Buffer.alloc(16);
   header.write('DPCH', 0);
   header.writeUInt32LE(width, 4);
   header.writeUInt32LE(height, 8);
   header.writeUInt32LE(changes.length, 12);
-
-  header.write(date, 16, 32, "ascii") // Source tile //
 
   await fs.writeFile(path, Buffer.concat([header, compressed]));
 }
 
 export async function readDPNG(filePath) {
   const fileBuf = await fs.readFile(filePath);
+
   const width  = fileBuf.readUInt32LE(4);
   const height = fileBuf.readUInt32LE(8);
-  const count = fileBuf.readUInt32LE(12);
-  const data  = fileBuf.subarray(32);
+  const count  = fileBuf.readUInt32LE(12);
+
+  const data  = fileBuf.subarray(16);
 
   return new DPNGFile(data, width, height, count);
 }
