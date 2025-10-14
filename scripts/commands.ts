@@ -11,6 +11,7 @@ import { SNAPSHOTS_DIR, Area, Snapshot, Context, SnapshotService } from './conte
 import * as dpng from "./dpng.js"
 
 import pkg from "gif-encoder-2";
+import { TileEntity, TileRepository } from "./sqlite.ts";
 const GIFEncoder = pkg.default || pkg;
 
 // Commands //
@@ -31,7 +32,7 @@ export async function handleLoad(ctx: Context, input: {[key: string]: any}): Pro
     if(name && date) {
         snapshot = SnapshotService.findSnapshot(name, date);
     } else {
-        snapshot = SnapshotService.findSnapshotByName(name);
+        snapshot = SnapshotService.findSnapshotLatest(name);
     }
 
     if(snapshot) {
@@ -60,14 +61,14 @@ export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}
     }
 
     let snapshot: Snapshot = new Snapshot(name); // New snapshot //
-    let latest_snapshot: Snapshot | null = SnapshotService.findSourceSnapshotByName(name);
+    let latest_snapshot: Snapshot | null = SnapshotService.findSnapshotLatest(name);
 
-    if(latest_snapshot) snapshot.delta_from = latest_snapshot;
-    
+    SnapshotService.createSnapshot(snapshot);
+
     let area: Area = await snapshot.readArea();
     if(input.flags.includes('-select') || area.empty()) area = ctx.selection;
 
-    await fs.mkdir(snapshot.fullPath, {recursive: true});
+    await fs.mkdir(`${snapshot.path}/${snapshot.version}`, {recursive: true});
 
     const queue: number[][] = await area.getXY();
 
@@ -76,23 +77,50 @@ export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}
         const batch = queue.splice(0, ctx.DOWNLOAD_LIMIT);
         await Promise.all(batch.map(async ([x, y]) => {
             try {
+                const tile = new TileEntity();
+                const tileKey: number = utils.hash_xy(x, y);
+
                 const downloadedTile = await utils.downloadFileWithRetry(`https://backend.wplace.live/files/s0/tiles/${x}/${y}.png`);
                 downloadSize += downloadedTile.length;
 
-                if(latest_snapshot !== null) {
-                    // DELTA //
-                    const latestTile = await fs.readFile(path.join(latest_snapshot.fullPath, `${x}_${y}.png`));
+                tile.snapshot_id = snapshot.id;
+                tile.hash = tileKey;
+                tile.baseline = snapshot.version;
+                tile.version  = snapshot.version;
+                tile.size     = downloadedTile.byteLength;
+                tile.changed  = 0;
 
+                if(latest_snapshot !== null && ctx.USE_VERSION_SYSTEM) {             
+                    // DELTA //
+                    const latestTileEntity: TileEntity | null = TileRepository.getLatest(snapshot.id, tileKey);
+                    if(!latestTileEntity) {
+                        console.log(`Failed to load ${x}_${y} tile from database.`)
+                        return;
+                    }
+
+                    const latestTile = await fs.readFile(`${snapshot.path}/${latestTileEntity.baseline}/${x}_${y}.png`);
                     const changes = await dpng.getChanges(latestTile, downloadedTile, 1000, 1000);
-                    if(changes.length > 0) {
-                        await dpng.writeDPNG(changes, 1000, 1000, `${snapshot.fullPath}/${x}_${y}.dpng`);
+
+                    if(changes.length > ctx.BASELINE_THRESHOLD_MEMORY) {
+                        await fs.writeFile(`${snapshot.path}/${snapshot.version}/${x}_${y}.png`, downloadedTile);
+                        TileRepository.save(tile);
+                    } else if(changes.length > 0) {
+                        await dpng.writeDPNG(changes, 1000, 1000, `${snapshot.path}/${snapshot.version}/${x}_${y}.dpng`);
+
+                        tile.baseline = latestTileEntity.baseline;
+                        tile.changed  = changes.length;
+
+                        TileRepository.save(tile);
+
+                        console.log(`Changes have been writed to '${x}_${y}'.dpng`);
                     }
                 } else {
-                    // SOURCE //
-                    await fs.writeFile(path.join(snapshot.fullPath, `${x}_${y}.png`), downloadedTile);
+                    // BASELINE //
+                    await fs.writeFile(`${snapshot.path}/${snapshot.version}/${x}_${y}.png`, downloadedTile);
+                    TileRepository.save(tile);
+                    
+                    console.log(`Saved tile '${x}_${y}'.png`);
                 }
-                
-                console.log(`Saved tile '${x}_${y}'.png`);
             } catch (e: any) {
                 console.error(`Failed to load tile with tl X: ${x}, tl Y: ${y}:`, e.message);
             }
@@ -134,11 +162,8 @@ export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}
 
     }*/
    
-    console.log("All tiles saved successfully!");
+    console.log("Snapshot finished!");
     await snapshot.writeArea(area);
-
-    // Saving data to database. //
-    SnapshotService.createSnapshot(snapshot);
 
     if (input.flags.includes('-s') || input.flags.includes('-switch')) {
         await ctx.changeSnapshot(snapshot);

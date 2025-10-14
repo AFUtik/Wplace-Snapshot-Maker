@@ -188,6 +188,7 @@ export class DPNGFile {
       return await uint32ArrayToPNGBuffer(buf32, width, height);
     } catch (e) {
       console.log(e);
+      return null;
     }
     
   }
@@ -236,6 +237,7 @@ export async function getChanges(imgA, imgB, width, height) {
     return changes;
   } catch (e) {
     console.log(e);
+    return [];
   }
 }
 

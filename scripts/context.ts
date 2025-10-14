@@ -6,7 +6,7 @@ import readline from "readline";
 import * as utils from './utils.js'
 import { performance } from 'perf_hooks';
 
-import { SnapshotRepository, SnapshotEntity } from './sqlite.ts';
+import { SnapshotRepository, SnapshotEntity, TileRepository, TileEntity, HistoryRepository, HistoryItemEntity } from './sqlite.ts';
 import { readDPNG, DPNGFile } from './dpng.js';
 import sharp from "sharp";
 
@@ -73,12 +73,11 @@ export class Area {
         return {x, y};
     }
 
-    private pointInPolygon(point: [number, number], vs: number[][]): boolean {
-        const [x, y] = point;
+    private pointInPolygon(x: number, y: number): boolean {
         let inside = false;
-        for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
-            const xi = vs[i][0], yi = vs[i][1];
-            const xj = vs[j][0], yj = vs[j][1];
+        for (let i = 0, j = this.data.length - 1; i < this.data.length; j = i++) {
+            const xi = this.data[i][0], yi = this.data[i][1];
+            const xj = this.data[j][0], yj = this.data[j][1];
 
             const intersect = ((yi > y) !== (yj > y)) &&
                 (x < (xj - xi) * (y - yi) / (yj - yi + 0.0000001) + xi);
@@ -86,16 +85,38 @@ export class Area {
         }
         return inside;
     }
-
-    private rectIntersectsPolygon(x: number, y: number, poly: number[][]): boolean {
+    
+    private rectIntersectsPolygon(x: number, y: number): boolean {
         const corners: [number, number][] = [
             [x, y],
             [x+1, y],
             [x, y+1],
             [x+1, y+1]
         ];
-        return corners.some(c => this.pointInPolygon(c, poly));
+        return corners.some(c => this.pointInPolygon(c[0], c[1]));
     }
+    
+    contains(x: number, y: number): boolean {
+        if (this.empty()) return false;
+
+        if (this.type === "rectangle") {
+            const [x0, y0] = this.data[0];
+            const [x1, y1] = this.data[1];
+            const minX = Math.min(x0, x1);
+            const maxX = Math.max(x0, x1);
+            const minY = Math.min(y0, y1);
+            const maxY = Math.max(y0, y1);
+
+            return x >= minX && x <= maxX && y >= minY && y <= maxY;
+        }
+
+        if (this.type === "polygon") {
+            return this.pointInPolygon(x, y);
+        }
+
+        return false;
+    }
+
 
     async getXY(): Promise<number[][]> {
         let queue = [];
@@ -119,7 +140,7 @@ export class Area {
 
             for (let y = Math.floor(miny); y <= Math.ceil(maxy); y++) {
                 for (let x = Math.floor(minx); x <= Math.ceil(maxx); x++) {
-                    if (this.rectIntersectsPolygon(x, y, this.data)) {
+                    if (this.rectIntersectsPolygon(x, y)) {
                         queue.push([Math.floor(x), Math.floor(y)]);
                     }
                 }
@@ -130,19 +151,16 @@ export class Area {
     }
 }
 
-
 export class Snapshot {
-    id: number = 0;
+    id: number = 1;
+    version: number = 1;
 
     name: string;
     date: string;
     size: number = 0;
 
-    fullPath: string;
-    rootPath: string;
-
-    delta_from: Snapshot | null = null;
-    changed: number = 0;
+    path: string;
+    area: Area;
 
     constructor(name: string, date: string = "", area: Area = new Area([[0, 0], [0, 0]])) {
         this.name = name;
@@ -153,124 +171,106 @@ export class Snapshot {
             this.date = `${now.getFullYear()}_${now.getMonth() + 1}_${now.getDate()}_${String(now.getHours()).padStart(2, '0')}_${String(now.getMinutes()).padStart(2, '0')}_${String(now.getSeconds()).padStart(2, '0')}`;
         }
 
-        this.fullPath = `${SNAPSHOTS_DIR}/${name}/${this.date}`;
-        this.rootPath = `${SNAPSHOTS_DIR}/${name}`;
+        this.area = area;
+        this.path = `${SNAPSHOTS_DIR}/${name}`;
     }
 
-    async loadTile(x: number, y: number): Promise<Buffer> {
-        if(this.delta_from !== null) {
-            const path_to_dpng = `${this.fullPath}/${x}_${y}.dpng`;
-            try {
-                await fs.access(path_to_dpng);
-            } catch  {
-                return await fs.readFile(`${this.delta_from.fullPath}/${x}_${y}.png`);
-            }
+    async loadTile(x: number, y: number): Promise<Buffer | null> {
+        const tile: TileEntity | null = TileRepository.get(this.id, this.version, utils.hash_xy(x, y));
+        if(!tile) return null;
 
-            const start = performance.now();
-
-            const dpng: DPNGFile = await readDPNG(`${this.fullPath}/${x}_${y}.dpng`);
-            const org:  Buffer   = await fs.readFile(`${this.delta_from.fullPath}/${x}_${y}.png`);
+        const path_to_png  = `${this.path}/${tile.baseline}/${x}_${y}.png`;
+        if(tile.baseline != tile.version) {
+            const path_to_dpng = `${this.path}/${tile.version}/${x}_${y}.dpng`;
+            
+            const dpng: DPNGFile = await readDPNG(path_to_dpng);
+            const org:  Buffer   = await fs.readFile(path_to_png);
 
             return await dpng.apply(org);
         } else {
-            return await fs.readFile(`${this.fullPath}/${x}_${y}.png`)
+            return await fs.readFile(path_to_png)
         }
-    }
-
-    async setDateNow() {
-        const now = new Date();
-
-        this.date = `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()}/${String(now.getHours()).padStart(2, '0')}/${String(now.getMinutes()).padStart(2, '0')}`
-        this.fullPath = `data/snapshots/${this.name}/${this.date}`;
-    }
-
-    async setDatePath(date: string) {
-        this.date = date;
-        this.fullPath = `data/snapshots/${this.name}/${date}`;
-    }
-
-    async setDate(date: Date) {
-        this.date = `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}/${String(date.getHours()).padStart(2, '0')}/${String(date.getMinutes()).padStart(2, '0')}`
-        this.fullPath = `data/snapshots/${this.name}/${this.date}`;
     }
 
     // Reads area info from metadata.json //
     async readArea(): Promise<Area> { 
-        if(!await utils.folderExists(this.rootPath)) return new Area([]);
+        if(!await utils.folderExists(this.path)) return new Area([]);
 
-        const meta = await utils.readJson(`${this.rootPath}/metadata.json`, {default: DEFAULT_META, createIfAbsent: true});
+        const meta = await utils.readJson(`${this.path}/metadata.json`, {default: DEFAULT_META, createIfAbsent: true});
 
         return new Area(meta.area, meta.area_type)
     }
 
     async writeArea(wr_area: Area): Promise<void> {
-        await utils.writeJson(`${this.rootPath}/metadata.json`, {area: wr_area.data, area_type: wr_area.type});
+        await utils.writeJson(`${this.path}/metadata.json`, {area: wr_area.data, area_type: wr_area.type});
     }
 
     // Checks a snapshot on disk //
     async exists(): Promise<boolean> {
-        if(!await utils.folderExists(this.fullPath)) return false;
+        if(!await utils.folderExists(this.path)) return false;
         return true;
     }
 }
 
-function mapEntityToSnapshot(entity: SnapshotEntity): Snapshot | null {
-    if(!entity) return null;
-    
-    const snapshot: Snapshot = new Snapshot(entity.name, utils.formattedToPath(entity.created_at));
-    snapshot.id   = entity.id;
-    snapshot.size = entity.size;
-    
-    if(entity.delta_from !== null) {
-        snapshot.delta_from = mapEntityToSnapshot(SnapshotRepository.getById(entity.delta_from));
-        snapshot.changed    = entity.changed;
-    }
-
-    return snapshot;
-}
-
-function mapSnapshotToEntity(snapshot: Snapshot): SnapshotEntity {
-    const entity = new SnapshotEntity();
-    entity.name  = snapshot.name;
-    entity.size  = snapshot.size;
-    
-    if(snapshot.delta_from !== null) {
-        entity.delta_from = snapshot.delta_from.id;
-        entity.changed    = snapshot.changed;
-    }
-
-    entity.created_at = utils.pathToFormatted(snapshot.date);
-    return entity;
-}
-
 export class SnapshotService {
-    static findSnapshotByName(name: string) {
-        return mapEntityToSnapshot(SnapshotRepository.getLatestSnapshot(
-            name
-        ));
-    }
+    static findSnapshotLatest(name: string): Snapshot | null {
+        const entity = SnapshotRepository.getByName(name);
+        if(!entity) return null;
 
-    static findSourceSnapshotByName(name: string) {
-        return mapEntityToSnapshot(SnapshotRepository.getLatestSourceSnapshot(
-            name
-        ));
+        const historyItem = HistoryRepository.getLatest(entity.id);
+        if(!historyItem) return null;
+
+        const snapshot = new Snapshot(name, historyItem.created_at);
+        snapshot.id = entity.id;
+        snapshot.version = historyItem.version;
+
+        return snapshot;
     }
 
     static findSnapshot(name: string, date: string) {
-        return mapEntityToSnapshot(SnapshotRepository.getSnapshot(
-            name, utils.pathToDate(date)
-        ));
+        const entity = SnapshotRepository.getByName(name);
+        if(!entity) return null;
+
+        const historyItem = HistoryRepository.getByDate(entity.id, date);
+        if(!historyItem) return null;
+
+        const snapshot = new Snapshot(name, historyItem.created_at);
+        snapshot.version = historyItem.version;
+
+        return snapshot;
     }
 
     static createSnapshot(snapshot: Snapshot) {
-        if(snapshot.delta_from !== null) {
-            SnapshotRepository.createDeltaSnapshot(mapSnapshotToEntity(snapshot));
-        } else {
-            SnapshotRepository.createSourceSnapshot(mapSnapshotToEntity(snapshot));
+        let entity: SnapshotEntity | null = SnapshotRepository.getByName(snapshot.name);
+        if(!entity) {
+            const newid: number = SnapshotRepository.save(snapshot.name);
+            entity = new SnapshotEntity({id: newid});
         }
+
+        let latest = HistoryRepository.getLatest(entity.id);
+        if(!latest) {
+            latest = new HistoryItemEntity({version: 0})
+        }
+        
+        const historyItem = new HistoryItemEntity();
+        historyItem.snapshot_id = entity.id;
+        historyItem.version = latest.version + 1;
+        historyItem.size = 0;
+        historyItem.created_at = snapshot.date;
+
+        snapshot.id = entity.id;
+        snapshot.version = historyItem.version;
+
+        HistoryRepository.save(historyItem);
     }
 };
 
+/*
+export class TileService { 
+    static getTile(id: number, version: number, x: number, y: number) {
+
+    }
+}*/
 
 export class Context {
     rl: readline.Interface;
@@ -284,6 +284,9 @@ export class Context {
     DOWNLOAD_COOLDOWN:      number;
     DOWNLOAD_LIMIT:         number;
 
+    BASELINE_THRESHOLD_MEMORY: number;
+    USE_VERSION_SYSTEM: boolean;
+
     snapshot: Snapshot;
     
     selection: Area;
@@ -296,11 +299,21 @@ export class Context {
         });
 
         this.intervals = {};
-
         this.CONCURRENCY = settings.concurrency;
 
-        this.TILE_CACHE = new LRUCache({ max: settings.tile_cache, });
-        this.IMAGE_BUFFER_CACHE = new LRUCache({ max: settings.chunk_image_cache });
+        this.TILE_CACHE = new LRUCache(
+            { 
+                maxSize: settings.tile_cache_memory, 
+                sizeCalculation: (image: Buffer) => image.byteLength
+            }
+        );
+
+        this.IMAGE_BUFFER_CACHE = new LRUCache(
+             { 
+                maxSize: settings.image_cache_memory, 
+                sizeCalculation: (image: Buffer) => image.byteLength
+            }
+        );
 
         this.CACHE_CONTROL = settings.cache_control;
         this.CACHE_CONTROL_LIFETIME = settings.cache_control_lifetime;
@@ -310,7 +323,9 @@ export class Context {
 
         this.selection = new Area([]);
         this.snapshot = new Snapshot("", "", new Area([]));
-        
+
+        this.BASELINE_THRESHOLD_MEMORY = settings.baseline_threshold_memory;
+        this.USE_VERSION_SYSTEM = settings.use_version_system;
     }
 
     ask(query: string): Promise<string> {
@@ -324,6 +339,8 @@ export class Context {
 
     async changeSnapshot(snapshot: Snapshot) {
         this.clearCache();
+
         this.snapshot = snapshot;
+        this.snapshot.area = await this.snapshot.readArea();
     }
 }

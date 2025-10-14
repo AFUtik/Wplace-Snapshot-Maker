@@ -138,4 +138,10 @@ export function dateToFormatted(d) {
 
 // other //
 
+// x and y don't exceed 2048 due to world's restrictions. //
+export function hash_xy(x, y) {return (x << 11) | y;}
+
+// z <= 32 //
+export function hash_zxy(z, x, y) {return (z << 22) | (x << 11) | y}
+
 export function sleep(ms) {return new Promise(resolve => setTimeout(resolve, ms));}

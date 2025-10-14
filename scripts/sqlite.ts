@@ -5,137 +5,163 @@ const db = new Database("data/tiles.db");
 db.exec(`
         CREATE TABLE IF NOT EXISTS snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            path TEXT NOT NULL,
-            size INTEGER DEFAULT 0,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        
-            delta_from INTEGER DEFAULT NULL,
-            changed INTEGER DEFAULT 0
+            name TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS tiles (
-
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_snapshots_name ON snapshots(name);
-        CREATE INDEX IF NOT EXISTS idx_snapshots_name_created_at ON snapshots(name, created_at DESC);
-`);
-
-
-db.exec(`
-        CREATE TABLE IF NOT EXISTS snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            path TEXT NOT NULL,
-        );
-
-        CREATE TABLE IF NOT EXISTS tiles (
-            snapshot_id   INTEGER NOT NULL,
-            x             INTEGER NOT NULL,
-            y             INTEGER NOT NULL,
-            size          INTEGER DEFAULT 0,
+        CREATE TABLE IF NOT EXISTS snapshots_history (
+            snapshot_id INTEGER NOT NULL,
+            version INTEGER NOT NULL,
+            size    INTEGER DEFAULT 0,
             
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 
-            origin_path TEXT NULL,
-            path        TEXT NOT NULL,
-
-            changed INTEGER DEFAULT 0,     
-            
+            PRIMARY KEY (snapshot_id, version),
             FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
         );
 
-        CREATE INDEX IF NOT EXISTS idx_tiles_latest 
-        ON tiles(snapshot_id, x, y, created_at DESC);
+        CREATE TABLE IF NOT EXISTS tiles (
+            snapshot_id INTEGER NOT NULL,
+            hash        INTEGER NOT NULL, 
+
+            baseline    INTEGER DEFAULT 0,
+            version     INTEGER DEFAULT 0,
+
+            size        INTEGER DEFAULT 0,
+            changed     INTEGER DEFAULT 0,
+            
+            FOREIGN KEY (snapshot_id, version) REFERENCES snapshots_history(snapshot_id, version) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tiles_snapshot_hash_version
+        ON tiles(snapshot_id, hash, version DESC);
 `);
-
-
-const create_src_stmt = db.prepare("INSERT INTO snapshots (name, path, size, created_at) VALUES (?, ?, ?, ?);");
-const create_delta_stmt = db.prepare("INSERT INTO snapshots (name, path, size, created_at, delta_from, changed) VALUES (?, ?, ?, ?, ?, ?);");
-const sel_desc_stmt = db.prepare("SELECT * FROM snapshots ORDER BY created_at DESC;")
-const sel_asc_stmt = db.prepare("SELECT * FROM snapshots ORDER BY created_at ASC;")
-const get_by_id_stmt = db.prepare("SELECT * FROM snapshots WHERE id = ?;")
-const get_latest_by_name_stmt = db.prepare("SELECT * FROM snapshots WHERE name = ? AND delta_from ORDER BY created_at DESC LIMIT 1;")
-const get_latest_src_by_name_stmt = db.prepare("SELECT * FROM snapshots WHERE name = ? AND delta_from IS NULL ORDER BY created_at DESC LIMIT 1;")
-const get_by_name_date_stmt = db.prepare("SELECT * FROM snapshots WHERE name = ? AND created_at = ?;")
-const get_memory_of_each_stmt = db.prepare("SELECT name, size FROM snapshots ORDER BY size DESC;");
-const get_dates_by_name_stmt = db.prepare("SELECT created_at FROM snapshots WHERE name = ? ORDER BY created_at DESC;")
 
 export class SnapshotEntity {
     id: number;
     name: string;
-    path: string;
-    size: number;
-    delta_from: number | null;
-    changed: number;
-    created_at: string;
 
     constructor(data?: Partial<SnapshotEntity>) {
         this.id = data?.id ?? 0;
         this.name = data?.name ?? "";
-        this.path = data?.path ?? "";
+    }
+}
+
+export class HistoryItemEntity {
+    snapshot_id: number;
+    version:     number;
+    size:        number;
+
+    created_at:  string;
+
+    constructor(data?: Partial<HistoryItemEntity>) {
+        this.snapshot_id = data?.snapshot_id ?? 0;
+        this.version = data?.version ?? 0;
         this.size = data?.size ?? 0;
-        this.delta_from = data?.delta_from ?? null;
-        this.changed = data?.changed ?? 0;
+        
         this.created_at = data?.created_at ?? "";
     }
 }
 
-function mapRowToSnapshot(row: any): SnapshotEntity {
-    return new SnapshotEntity({
-        id: row.id,
-        name: row.name,
-        path: row.path,
-        size: row.size,
-        delta_from: row.delta_from,
-        changed: row.changed,
-        created_at: row.created_at
-    });
+export class TileEntity {
+    snapshot_id: number;
+    hash:        number;
+
+    baseline:    number;
+    version:     number;
+
+    size:    number;
+    changed: number;
+    
+    constructor(data?: Partial<TileEntity>) {
+        this.snapshot_id = data?.snapshot_id ?? 0;
+        this.hash = data?.hash ?? 0;
+
+        this.baseline = data?.baseline ?? 0;
+        this.version  = data?.version ?? 0;
+        
+        this.size = data?.size ?? 0;
+        this.changed = data?.changed ?? 0;
+    }
+};
+
+export class TileRepository {
+    static get_stmt = db.prepare(`
+        SELECT * FROM tiles 
+        WHERE snapshot_id = ? AND version <= ? AND hash = ? 
+        ORDER BY version DESC 
+        LIMIT 1;
+    `);
+
+    static get_latest_stmt = db.prepare(`
+        SELECT * FROM tiles 
+        WHERE snapshot_id = ? AND hash = ? 
+        ORDER BY version DESC 
+        LIMIT 1;
+    `)
+
+    static insert_stmt = db.prepare(`
+        INSERT INTO tiles (snapshot_id, hash, baseline, version, size, changed) VALUES (?, ?, ?, ?, ?, ?);
+    `);
+
+    static get(id: number, version: number, hash: number) {
+        const row = this.get_stmt.get(id, version, hash);
+        return row ? new TileEntity(row) : null;
+    }
+
+    static getLatest(id: number, hash: number) {
+        const row = this.get_latest_stmt.get(id, hash);
+        return row ? new TileEntity(row) : null;
+    }
+
+    static save(entity: TileEntity): void {
+        this.insert_stmt.run(entity.snapshot_id, entity.hash, entity.baseline, entity.version, entity.size, entity.changed);
+    }
 }
 
 export class SnapshotRepository {
-    static createSourceSnapshot(snapshot: SnapshotEntity) {
-        create_src_stmt.run(
-            snapshot.name, 
-            snapshot.path,
-            snapshot.size,
-            snapshot.created_at);
+    static insert_stmt = db.prepare("INSERT INTO snapshots (name) VALUES (?);");
+    static delete_stmt = db.prepare("DELETE FROM snapshots WHERE id = ?;")
+
+    static get_stmt = db.prepare("SELECT * FROM snapshots WHERE id = ?;")
+    static get_by_name_stmt = db.prepare("SELECT * FROM snapshots WHERE name = ?;")
+
+    static save(name: string) {
+        const info = this.insert_stmt.run(name);
+        console.log(info.lastInsertRowid);
+        return info.lastInsertRowid;
     }
 
-    static createDeltaSnapshot(snapshot: SnapshotEntity) {
-        create_delta_stmt.run(
-            snapshot.name, 
-            snapshot.path,
-            snapshot.size,
-            snapshot.created_at,
-            snapshot.delta_from,
-            snapshot.changed);
+    static delete(id: number) {
+        this.delete_stmt.run(id);
     }
 
     static getById(id: number) {
-        return mapRowToSnapshot(get_by_id_stmt.get(id));
+        const row = this.get_stmt.get(id)
+        return row ? new SnapshotEntity(row) : null;
     }
 
-    static getLatestSnapshot(name: string): SnapshotEntity | null {
-        const row = get_latest_by_name_stmt.get(name);
-        return row ? mapRowToSnapshot(row) : null;
+    static getByName(name: string) {
+        const row = this.get_by_name_stmt.get(name)
+        return row ? new SnapshotEntity(row) : null;
+    }
+}
+
+export class HistoryRepository {
+    static insert_stmt = db.prepare("INSERT INTO snapshots_history (snapshot_id, version, size, created_at) VALUES (?, ?, ?, ?);");
+    static get_stmt = db.prepare("SELECT * FROM snapshots_history WHERE snapshot_id = ? ORDER BY created_at DESC LIMIT 1;")
+    static get_by_date_stmt = db.prepare("SELECT * FROM snapshots_history WHERE snapshot_id = ? AND created_at = ? LIMIT 1;")
+    
+    static save(entity: HistoryItemEntity) {
+        this.insert_stmt.run(entity.snapshot_id, entity.version, entity.size, entity.created_at);
     }
 
-    static getLatestSourceSnapshot(name: string): SnapshotEntity | null {
-        const row = get_latest_src_by_name_stmt.get(name);
-        return row ? mapRowToSnapshot(row) : null;
+    static getByDate(id: number, date: string) {
+        const row = this.get_by_date_stmt.get(id, date)
+        return row ? new HistoryItemEntity(row) : null;
     }
 
-    static getSnapshot(name: string, date: Date): SnapshotEntity {
-        return mapRowToSnapshot(get_by_name_date_stmt.get(name, date));
-    }
-
-    static getDatesByName(name: string): any {
-        return get_dates_by_name_stmt.all(name);
-    }
-
-    static getMemoryOfEach(): any {
-        return get_memory_of_each_stmt.all();
+    static getLatest(id: number) {
+        const row = this.get_stmt.get(id)
+        return row ? new HistoryItemEntity(row) : null;
     }
 }

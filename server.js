@@ -12,13 +12,19 @@ import {Area, Context, Snapshot} from "./scripts/context.ts"
 import * as utils from "./scripts/utils.js"
 
 const DEFAULT_SETTINGS = {
-  cache_control: true,
-  cache_control_lifetime: 60,
-  tile_cache: 300,
-  chunk_image_cache: 200,
+  cache_control: false,       // - Creates cache of a tile in your browser to avoid multiple queries to server.
+  cache_control_lifetime: 60, // - It marks how many time a tile stores in the cache of the browser. By default 60 seconds.
+
+  image_cache_memory: 512 * (1024 * 1024), // - Max cache size of image. By default 512 mb.
+  tile_cache_memory: 1024 * (1024 * 1024), // - Max cache size of tile. By default 1024 mb.
+
   download_cooldown: 1000,
   download_limit: 5,
-  concurrency: 4
+  concurrency: 4, 
+
+  use_version_system: true,
+  baseline_threshold_memory: 50 * 1024  // - It creates new baseline of a tile If a file of changes weights more 50 kilobytes. 
+                                        // Works only if option 'use_version_system' is enabled. //
 };
 
 const commands = {
@@ -255,15 +261,20 @@ app.post("/createGif", async (req, res) => {
 
 const renderQueue = new PQueue({ concurrency: context.CONCURRENCY });
 
-async function loadTile() {
-  
-}
+const EMPTY_TILE = Symbol('EMPTY_TILE');
+
+let CURRENT_ZOOM = 0;
 
 app.get('/tiles/:z/:x/:y.png', async (req, res) => {
   const z = Number(req.params.z);
+  if(CURRENT_ZOOM != z) {
+    renderQueue.clear();
+    CURRENT_ZOOM = z;
+  }
+
   const x = Number(req.params.x);
   const y = Number(req.params.y);
-  const cacheKey = `${z}_${x}_${y}`;
+  const cacheKey = utils.hash_zxy(z, x, y);
 
   const cached = context.TILE_CACHE.get(cacheKey);
   if (cached) {
@@ -271,7 +282,6 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
     if (context.CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${context.CACHE_CONTROL_LIFETIME}`);
     return res.end(cached);
   }
-
 
   renderQueue.add(async () => {
     const canvas = createCanvas(TILE_SIZE, TILE_SIZE);
@@ -290,16 +300,20 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
     const cy1 = Math.floor((py + tileWorldHeight - 1) / CHUNK_SIZE);
     for (let cx = cx0; cx <= cx1; cx++) {
       for (let cy = cy0; cy <= cy1; cy++) {
-        const chunkKey = `${cx}_${cy}`;
+        const chunkKey = utils.hash_xy(cx, cy);
         let img_buf = context.IMAGE_BUFFER_CACHE.get(chunkKey);
+        
+        if (img_buf === EMPTY_TILE) continue;
         if (!img_buf) {
           try {
             img_buf = await context.snapshot.loadTile(cx, cy);
-            context.IMAGE_BUFFER_CACHE.set(chunkKey, img_buf);
+            context.IMAGE_BUFFER_CACHE.set(chunkKey, img_buf ?? EMPTY_TILE);
+            if (img_buf === null) continue;
           } catch {
             continue;
           }
         }
+
         const img = await loadImage(img_buf);
 
         const chunkPx = cx * CHUNK_SIZE;
@@ -338,7 +352,7 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
       res.end(buf);
     }
 
-  }, { priority: z });
+  });
 });
 
 app.post('/points/rectangle', async (req, res) => {
