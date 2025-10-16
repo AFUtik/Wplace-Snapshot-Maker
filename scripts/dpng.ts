@@ -1,8 +1,9 @@
 import fs from "fs/promises"
+
 import zlib from "zlib"
 import sharp from "sharp";
 
-const indexedPallette = {
+const indexedPallette: {[key: number]: number} = {
   0: 0,
   4278190080: 1,
   4278823670: 2,
@@ -68,7 +69,7 @@ const indexedPallette = {
   4294967295: 62
 }
 
-const indexedPalletteInv = [
+const indexedPalletteInv: {[key: number]: number} = [
   0,
   4278190080,
   4278823670,
@@ -134,8 +135,10 @@ const indexedPalletteInv = [
   4294967295
 ]
 
-async function pngBufferToUint32Array(pngBuffer) {
-  const { data, info } = await sharp(pngBuffer)
+export type PNGBuffer = Buffer;
+
+async function pngBufferToUint32Array(buffer: PNGBuffer): Promise<{uint32: Uint32Array, width: number, height: number}> {
+  const { data, info } = await sharp(buffer)
     .raw()
     .ensureAlpha()
     .toBuffer({ resolveWithObject: true });
@@ -144,7 +147,7 @@ async function pngBufferToUint32Array(pngBuffer) {
   return { uint32, width: info.width, height: info.height };
 }
 
-async function uint32ArrayToPNGBuffer(buf32, width, height) {
+async function uint32ArrayToPNGBuffer(buf32: Uint32Array, width: number, height: number): Promise<Buffer> {
   return await sharp(new Uint8Array(buf32.buffer), {
     raw: {
       width,
@@ -155,16 +158,20 @@ async function uint32ArrayToPNGBuffer(buf32, width, height) {
 }
 
 export class DPNGFile {
-  #data;
+  data:   Buffer;
+  width:  number;
+  height: number;
+  count:  number;
 
-  constructor(data, width, height, count) {
+  constructor(data: Buffer, width: number, height: number, count: number) {
     this.data = data;
     this.width  = width;
     this.height = height;
     this.count  = count;
   }
 
-  async apply(image) {
+  // returns buffer/png
+  async apply(image: PNGBuffer) {
     try {
       const { uint32: buf32, width, height } = await pngBufferToUint32Array(image);
       const payload = zlib.inflateSync(this.data);
@@ -190,7 +197,35 @@ export class DPNGFile {
       console.log(e);
       return null;
     }
-    
+  }
+
+  // returns raw data
+  async applyRaw(image: Buffer) {
+    try {
+      const buf32 = new Uint32Array(image.buffer, image.byteOffset, image.length >> 2);
+      const payload = zlib.inflateSync(this.data);
+
+      let i = 0, prevIdx = 0;
+
+      for (let n = 0; n < this.count; n++) {
+          let delta = payload[i++];
+          if (delta === 0xFF) {
+              delta = payload[i] | (payload[i+1] << 8) | (payload[i+2] << 16) | (payload[i+3] << 24);
+              i += 4;
+          }
+
+          const idx = prevIdx + delta;
+          const color = indexedPalletteInv[payload[i++]];
+
+          buf32[idx] = color;
+          prevIdx = idx;
+      }
+
+      return Buffer.from(buf32.buffer);
+    } catch (e) {
+      console.log(e);
+      return null;
+    }
   }
 
   async getImage() {
@@ -217,7 +252,7 @@ export class DPNGFile {
   }
 }
 
-export async function getChanges(imgA, imgB, width, height) {
+export async function getChanges(imgA: PNGBuffer, imgB: PNGBuffer, width: number, height: number) {
   try {
     const { uint32: a32 } = await pngBufferToUint32Array(imgA);
     const { uint32: b32 } = await pngBufferToUint32Array(imgB);
@@ -241,7 +276,7 @@ export async function getChanges(imgA, imgB, width, height) {
   }
 }
 
-export async function writeDPNG(changes, width, height, path) {
+export async function writeDPNG(changes: {idx: number, color: number}[], width: number, height: number, path: string) {
   const payload = [];
   let prevIdx = 0;
 
@@ -270,9 +305,11 @@ export async function writeDPNG(changes, width, height, path) {
   header.writeUInt32LE(changes.length, 12);
 
   await fs.writeFile(path, Buffer.concat([header, compressed]));
+
+  return compressed.byteLength + 24;
 }
 
-export async function readDPNG(filePath) {
+export async function readDPNG(filePath: string) {
   const fileBuf = await fs.readFile(filePath);
 
   const width  = fileBuf.readUInt32LE(4);

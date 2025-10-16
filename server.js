@@ -3,41 +3,41 @@ import path from 'path';
 import fs from 'fs/promises';
 import PQueue from "p-queue";
 import dotenv from "dotenv"
-
-import { createCanvas, loadImage } from 'canvas';
+import sharp from 'sharp';
 
 import * as cmd from "./scripts/commands.ts"
-import {Area, Context, Snapshot} from "./scripts/context.ts"
+import {Area, Context} from "./scripts/context.ts"
 
-import * as utils from "./scripts/utils.js"
+import * as utils from "./scripts/utils.ts"
+import { HistoryRepository, SnapshotRepository } from './scripts/sqlite.ts';
 
 const DEFAULT_SETTINGS = {
   cache_control: false,       // - Creates cache of a tile in your browser to avoid multiple queries to server.
   cache_control_lifetime: 60, // - It marks how many time a tile stores in the cache of the browser. By default 60 seconds.
 
-  image_cache_memory: 512 * (1024 * 1024), // - Max cache size of image. By default 512 mb.
-  tile_cache_memory: 1024 * (1024 * 1024), // - Max cache size of tile. By default 1024 mb.
+  image_cache_memory: 512 * (1024 * 1024), // - Max cache size of images. By default 512 mb.
+  tile_cache_memory: 1024 * (1024 * 1024), // - Max cache size of tiles. By default 1024 mb.
 
   download_cooldown: 1000,
   download_limit: 5,
   concurrency: 4, 
 
   use_version_system: true,
-  baseline_threshold_memory: 50 * 1024  // - It creates new baseline of a tile If a file of changes weights more 50 kilobytes. 
-                                        // Works only if option 'use_version_system' is enabled. //
+  baseline_threshold_memory: 50 * 1024,  // - It creates new baseline of a tile If a file of changes weights more 50 kilobytes. 
+                                         // Works only if option 'use_version_system' is enabled. //
+
+  ignore_changes: 20
 };
 
 const commands = {
   load: cmd.handleLoad,
   snapshot: cmd.handleSnapshot,
   delete: cmd.handleDelete,
-  current: cmd.handleCurrent,
   memory: cmd.handleMemory,
-  show: cmd.handleShow,
-  limit: cmd.handleLimit,
   image: cmd.handleImage,
   schedule: cmd.handleSchedule,
-  gif: cmd.handleGif
+  gif: cmd.handleGif,
+  import: cmd.handleImport
 }
 
 let settings = await utils.readJson('data/settings.json')
@@ -105,37 +105,40 @@ app.get('/origin', async (req, res) => {
 });
 
 app.get('/snapshots', async (req, res) => {
-  res.json({"items": await cmd.getSnapshots()})
+  res.json({"items": SnapshotRepository.getAll().map(s => s.name)})
 });
 
 app.get('/dates', async (req, res) => {
-  if(!context.snapshot.name) return;
-  
-  const dates = await cmd.getSnapshotChanges(context.snapshot, "-d");
-  
-  res.json({"items": dates.map(d => utils.dateToFormatted(d))})
+  if(context.snapshot.id === 0) return;
+
+  res.json({"items": 
+    HistoryRepository.getDates(context.snapshot.id)
+    .map(d => utils.unixToFormatted(d.created_at))
+  })
 });
 
 app.post('/dates/after', async (req, res) => {
   if(!context.snapshot.name) return;
 
-  const after = utils.formattedToDate(req.body.after);
-  
-  const dates = await cmd.getSnapshotChanges(context.snapshot, "-d");
-  const filtered = dates.filter(d => d >= after);
-  
-  res.json({"dates": filtered.map(d => utils.dateToFormatted(d))})
+  const after = utils.formattedToUnix(req.body.after);
+
+  res.json({"items": 
+    HistoryRepository.getDates(context.snapshot.id)
+    .filter(d => d.created_at > after)
+    .map(d => utils.unixToFormatted(d.created_at))
+  })
 });
 
 app.post('/dates/before', async (req, res) => {
   if(!context.snapshot.name) return;
   
-  const before = utils.formattedToDate(req.body.before);
-  
-  const dates = await cmd.getSnapshotChanges(context.snapshot, "-d");
-  const filtered = dates.filter(d => d <= before);
-  
-  res.json({"dates": filtered.map(d => utils.dateToFormatted(d))})
+  const before = utils.formattedToUnix(req.body.before);
+
+  res.json({"items": 
+    HistoryRepository.getDates(context.snapshot.id)
+    .filter(d => d.created_at < before)
+    .map(d => utils.unixToFormatted(d.created_at))
+  })
 });
 
 app.get('/loadByName/:name', async (req, res) => {
@@ -151,7 +154,7 @@ app.get('/loadByName/:name', async (req, res) => {
 
   res.json({ status: "ok", received: req.body, snapshot: {
     name: snapshot.name,
-    date: utils.pathToFormatted(snapshot.date)
+    date: utils.unixToFormatted(snapshot.created_at)
   } });
 });
 
@@ -162,7 +165,7 @@ app.post('/loadByDate', async (req, res) => {
 
   const snapshot = await commands.load(
     context, {
-      args:   ['load', context.snapshot.name, utils.formattedToPath(date)],
+      args:   ['load', context.snapshot.name, date],
       flags:  [],
       params: {}
     }
@@ -175,12 +178,9 @@ app.post('/loadByDate', async (req, res) => {
 });
 
 app.post('/load', async (req, res) => {
-  const name = req.body.name;
-  const date = utils.formattedToPath(req.body.date);
-  
   await commands.load(
     context, {
-      args:   ['load', name, date],
+      args:   ['load', req.body.name, req.body.date],
       flags:  [],
       params: {}
     }
@@ -250,7 +250,7 @@ app.post("/createGif", async (req, res) => {
 
   await commands.gif(
     context, {
-      args:   ['gif', context.snapshot.name, req.body.delay, utils.formattedToPath(req.body.from), utils.formattedToPath(req.body.to)],
+      args:   ['gif', context.snapshot.name, req.body.delay, utils.formattedToUnix(req.body.from), utils.formattedToUnix(req.body.to)],
       flags:  [],
       params: {}
     }
@@ -267,7 +267,7 @@ let CURRENT_ZOOM = 0;
 
 app.get('/tiles/:z/:x/:y.png', async (req, res) => {
   const z = Number(req.params.z);
-  if(CURRENT_ZOOM != z) {
+  if (CURRENT_ZOOM != z) {
     renderQueue.clear();
     CURRENT_ZOOM = z;
   }
@@ -284,13 +284,7 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
   }
 
   renderQueue.add(async () => {
-    const canvas = createCanvas(TILE_SIZE, TILE_SIZE);
-    const ctx = canvas.getContext('2d');
-
-    ctx.clearRect(0, 0, TILE_SIZE, TILE_SIZE);
-
     const { px, py, scale } = tileToPixel(z, x, y);
-
     const tileWorldWidth = Math.round(TILE_SIZE * scale);
     const tileWorldHeight = Math.round(TILE_SIZE * scale);
 
@@ -298,11 +292,14 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
     const cy0 = Math.floor(py / CHUNK_SIZE);
     const cx1 = Math.floor((px + tileWorldWidth - 1) / CHUNK_SIZE);
     const cy1 = Math.floor((py + tileWorldHeight - 1) / CHUNK_SIZE);
+
+    const layers = [];
+
     for (let cx = cx0; cx <= cx1; cx++) {
       for (let cy = cy0; cy <= cy1; cy++) {
         const chunkKey = utils.hash_xy(cx, cy);
         let img_buf = context.IMAGE_BUFFER_CACHE.get(chunkKey);
-        
+
         if (img_buf === EMPTY_TILE) continue;
         if (!img_buf) {
           try {
@@ -313,8 +310,6 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
             continue;
           }
         }
-
-        const img = await loadImage(img_buf);
 
         const chunkPx = cx * CHUNK_SIZE;
         const chunkPy = cy * CHUNK_SIZE;
@@ -335,23 +330,35 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
         const dw = Math.round(sWidth / scale);
         const dh = Math.round(sHeight / scale);
 
-        try {
-          ctx.drawImage(img, sx, sy, sWidth, sHeight, dx, dy, dw, dh);
-        } catch (e) {
-          console.error('drawImage error', e);
-        }
+        layers.push({
+          input: await sharp(img_buf)
+            .extract({ left: sx, top: sy, width: sWidth, height: sHeight })
+            .resize(dw, dh)
+            .toBuffer(),
+          top: dy,
+          left: dx,
+        });
       }
     }
 
-    const buf = canvas.toBuffer('image/png');
+    const base = sharp({
+      create: {
+        width:  TILE_SIZE,
+        height: TILE_SIZE,
+        channels: 4,
+        background: { r: 0, g: 0, b: 0, alpha: 0 },
+      },
+    });
+
+    const buf = await base.composite(layers).png().toBuffer();
     context.TILE_CACHE.set(cacheKey, buf);
 
     if (!res.writableEnded) {
       res.setHeader('Content-Type', 'image/png');
-      if (context.CACHE_CONTROL) res.setHeader('Cache-Control', `public, max-age=${context.CACHE_CONTROL_LIFETIME}`);
+      if (context.CACHE_CONTROL)
+        res.setHeader('Cache-Control', `public, max-age=${context.CACHE_CONTROL_LIFETIME}`);
       res.end(buf);
     }
-
   });
 });
 

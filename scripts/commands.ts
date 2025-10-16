@@ -1,24 +1,33 @@
-import * as utils from "./utils.js" 
+import * as utils from "./utils.ts" 
 
 import fs  from 'fs/promises';
 import fsc from 'fs';
 
 import path from "path";
 
-import { createCanvas, Image, loadImage } from 'canvas';
 import { SNAPSHOTS_DIR, Area, Snapshot, Context, SnapshotService } from './context.ts';
 
-import * as dpng from "./dpng.js"
+import * as dpng from "./dpng.ts"
+import sharp from "sharp";
 
 import pkg from "gif-encoder-2";
-import { TileEntity, TileRepository } from "./sqlite.ts";
+import { HistoryItemEntity, HistoryRepository, SnapshotRepository, TileEntity, TileRepository } from "./sqlite.ts";
+
 const GIFEncoder = pkg.default || pkg;
 
 // Commands //
 
 export async function handleLoad(ctx: Context, input: {[key: string]: any}): Promise<Snapshot> {
-    let [, name, date] = input.args as [string, string, string]; 
-    if(name == ctx.snapshot.name && date == ctx.snapshot.date) return ctx.snapshot;
+    let [, name, localDate] = input.args as [string, string, string]; 
+    const date: number = localDate ? utils.formattedToUnix(localDate) : 0;
+
+    if(name == ctx.snapshot.name && date == ctx.snapshot.created_at) return ctx.snapshot;
+    
+    await handleImport(ctx,
+        {
+            args: ['import', name, date]
+        }
+    )
     
     if (!name) {
         if (!ctx.snapshot.name) name = ctx.snapshot.name;
@@ -37,7 +46,7 @@ export async function handleLoad(ctx: Context, input: {[key: string]: any}): Pro
 
     if(snapshot) {
         await ctx.changeSnapshot(snapshot);
-        console.log(`Snapshot was succefully loaded. The current snapshot is ${name}[${utils.pathToFormatted(snapshot.date)}].`)
+        console.log(`Snapshot was succefully loaded. The current snapshot is ${name}[${utils.unixToFormatted(snapshot.created_at)}].`)
         
         return snapshot;
     } else {
@@ -63,63 +72,68 @@ export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}
     let snapshot: Snapshot = new Snapshot(name); // New snapshot //
     let latest_snapshot: Snapshot | null = SnapshotService.findSnapshotLatest(name);
 
+    await snapshot.ensureDir();
     SnapshotService.createSnapshot(snapshot);
 
     let area: Area = await snapshot.readArea();
     if(input.flags.includes('-select') || area.empty()) area = ctx.selection;
 
-    await fs.mkdir(`${snapshot.path}/${snapshot.version}`, {recursive: true});
-
     const queue: number[][] = await area.getXY();
+    const progress = ctx.createProgress({total: queue.length, width: 40});
 
     let downloadSize = 0;
+
+    let created = 0;
+    let changed = 0;
+    let failed = 0;
+
     while (queue.length > 0) {
         const batch = queue.splice(0, ctx.DOWNLOAD_LIMIT);
         await Promise.all(batch.map(async ([x, y]) => {
             try {
+                progress.tick(1);
+
                 const tile = new TileEntity();
                 const tileKey: number = utils.hash_xy(x, y);
 
                 const downloadedTile = await utils.downloadFileWithRetry(`https://backend.wplace.live/files/s0/tiles/${x}/${y}.png`);
-                downloadSize += downloadedTile.length;
-
+                
                 tile.snapshot_id = snapshot.id;
                 tile.hash = tileKey;
-                tile.baseline = snapshot.version;
-                tile.version  = snapshot.version;
+                tile.baseline   = snapshot.created_at;
+                tile.created_at = snapshot.created_at;
                 tile.size     = downloadedTile.byteLength;
                 tile.changed  = 0;
 
-                if(latest_snapshot !== null && ctx.USE_VERSION_SYSTEM) {             
-                    // DELTA //
-                    const latestTileEntity: TileEntity | null = TileRepository.getLatest(snapshot.id, tileKey);
-                    if(!latestTileEntity) {
-                        console.log(`Failed to load ${x}_${y} tile from database.`)
-                        return;
-                    }
-
-                    const latestTile = await fs.readFile(`${snapshot.path}/${latestTileEntity.baseline}/${x}_${y}.png`);
+                const latestTileEntity: TileEntity | null = TileRepository.getLatest(snapshot.id, tileKey);
+                if(latestTileEntity && ctx.USE_VERSION_SYSTEM) {             
+                    const latestTile = await fs.readFile(`${snapshot.rootPath}/${latestTileEntity.baseline}/${x}_${y}.png`);
                     const changes = await dpng.getChanges(latestTile, downloadedTile, 1000, 1000);
 
                     if(changes.length > ctx.BASELINE_THRESHOLD_MEMORY) {
-                        await fs.writeFile(`${snapshot.path}/${snapshot.version}/${x}_${y}.png`, downloadedTile);
+                        downloadSize += downloadedTile.byteLength;
+
+                        await fs.writeFile(`${snapshot.fullPath}/${x}_${y}.png`, downloadedTile);
                         TileRepository.save(tile);
+
+                        created++;
                     } else if(changes.length > 0) {
-                        await dpng.writeDPNG(changes, 1000, 1000, `${snapshot.path}/${snapshot.version}/${x}_${y}.dpng`);
+                        downloadSize += await dpng.writeDPNG(changes, 1000, 1000, `${snapshot.fullPath}/${x}_${y}.dpng`);
 
                         tile.baseline = latestTileEntity.baseline;
                         tile.changed  = changes.length;
 
                         TileRepository.save(tile);
-
-                        console.log(`Changes have been writed to '${x}_${y}'.dpng`);
+                        changed++;
                     }
                 } else {
+                    downloadSize += downloadedTile.byteLength;
+
                     // BASELINE //
-                    await fs.writeFile(`${snapshot.path}/${snapshot.version}/${x}_${y}.png`, downloadedTile);
+                    await fs.writeFile(`${snapshot.fullPath}/${x}_${y}.png`, downloadedTile);
                     TileRepository.save(tile);
-                    
-                    console.log(`Saved tile '${x}_${y}'.png`);
+
+                    created++;
                 }
             } catch (e: any) {
                 console.error(`Failed to load tile with tl X: ${x}, tl Y: ${y}:`, e.message);
@@ -128,41 +142,9 @@ export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}
         await utils.sleep(ctx.DOWNLOAD_COOLDOWN);
     }
     snapshot.size = downloadSize;
+    HistoryRepository.updateMemory(snapshot.id, snapshot.created_at, snapshot.size);
 
-    // TO DO //
-    /*if (limit != 0) {
-        const sizeBefore = await getSnapshotSize(snapshot);
-        let newSize = sizeBefore + downloadSize;
-
-        if (newSize > limit) {
-            const changes = await getSnapshotChanges(name, '-a')
-            const deletePaths = [];
-            for (const change of changes) {
-                if (newSize > limit) {
-                    const __path = `data/snapshots/${name}/${utils.dateToPath(change)}`
-
-                    newSize -= await getSnapshotSize(name, { metaIn: meta, date: utils.dateToPath(change) });
-                    deletePaths.push(__path);
-                } else break;
-            }
-
-            const answer: string = await ctx.ask(`You're going to delete ${deletePaths.length} change(s) of '${name}' to free disk space. Are you sure? Write y/n to confirm: `)
-            if (['y', 'yes'].includes(answer.trim().toLowerCase())) {
-                for (const deletePath of deletePaths) {
-                    try {
-                        await fs.rm(deletePath, { recursive: true, force: true });
-                    } catch (e) {
-                        console.log("Failed to delete changes.")
-                    }
-                }
-            } else {
-                console.log("Tip: You can expand limit by command `limit <your limit in megabytes>`")
-            }
-        }
-
-    }*/
-   
-    console.log("Snapshot finished!");
+    console.log(`Snapshot finished! Created: ${created}; Changed: ${changed}; Writed To Disk: ${(downloadSize / (1024*1024)).toFixed(3)} mb`);
     await snapshot.writeArea(area);
 
     if (input.flags.includes('-s') || input.flags.includes('-switch')) {
@@ -172,23 +154,23 @@ export async function handleSnapshot(ctx: Context, input: {[key: string]: any[]}
 }
 
 export async function handleDelete(ctx: Context, input: {[key: string]: any}) {
-    const [, name, date] = input.args;
+    const [, name, date = 0] = input.args;
     if(!name) {
         console.log("Name not specified.");
         return;
     }
+
     let snapshot: Snapshot | null = null;
     if(name && date) {
         snapshot = SnapshotService.findSnapshot(name, date);
     } else {
-        snapshot = SnapshotService.findSnapshotByName(name);
+        snapshot = SnapshotService.findSnapshotLatest(name);
     }
     
     if(snapshot && await snapshot.exists()) {
         const stat = await fs.stat(snapshot.fullPath);
         if (stat.isDirectory()) {
-            await fs.rm(snapshot.fullPath, { recursive: true, force: true });
-            await utils.removeEmptyParents(path.dirname(snapshot.fullPath), snapshot.name);
+            await fs.rm(snapshot.fullPath, {recursive: true, force: true});
 
             console.log(`Snapshot was deleted.`);
         }
@@ -196,12 +178,14 @@ export async function handleDelete(ctx: Context, input: {[key: string]: any}) {
         console.log("Snapshot not found.")
         return;
     }
+
+    SnapshotService.deleteSnapshot(snapshot);
 }
 
 export async function handleMemory(ctx: Context, input: {[key: string]: any}) {
     const [, name] = input.args as [string, string];
     if (name) {
-        const snapshot: Snapshot | null = SnapshotService.findSnapshotByName(name);
+        const snapshot: Snapshot | null = SnapshotService.findSnapshotLatest(name);
         if(!snapshot) {
             console.log("Snapshot not found")
             return;
@@ -210,10 +194,10 @@ export async function handleMemory(ctx: Context, input: {[key: string]: any}) {
     } else {
         let total = 0;
 
-        const snapshots = await fs.readdir("data/snapshots", { withFileTypes: true });
-        for (const snapshot_folder of snapshots) {
-            const snapshotSize = await getSnapshotSize(new Snapshot(snapshot_folder.name));
-            console.log(`${snapshot_folder.name} - ${(snapshotSize / (1024 * 1024)).toFixed(2)} mb`);
+        const snapshots = await SnapshotRepository.getAll();
+        for (const snapshot of snapshots) {
+            const snapshotSize = HistoryRepository.countMemory(snapshot.id);
+            console.log(`${snapshot.name} - ${(snapshotSize / (1024 * 1024)).toFixed(2)} mb`);
 
             total += snapshotSize;
         }
@@ -222,65 +206,31 @@ export async function handleMemory(ctx: Context, input: {[key: string]: any}) {
     }
 }
 
-export async function handleCurrent(ctx: Context, input: {[key: string]: any}) {
-    console.log(ctx.snapshot.name, ctx.snapshot.date);
-}
-
-export async function handleShow(ctx: Context, input: {[key: string]: any}) {
-    const [, name, date = ""] = input.args;
-    const snapshot: Snapshot = new Snapshot(name, date)
-
-    if (name) {
-        if (date) {
-            const [month, day, year, hour, minute] = date.trim().split(/[-/]+/).map(Number);
-        } else {
-            const dates = await getSnapshotChanges(snapshot, input.flags[0]);
-            const formatted = dates.map(d => utils.dateToFormatted(d));
-
-            console.log("Dates:", formatted);
-        }
-    } else {
-        try {
-            const files = await fs.readdir("data/snapshots", { withFileTypes: true });
-            const folders = files.filter(d => d.isDirectory()).map(d => d.name);
-
-            console.log('Snapshots:', folders);
-        } catch (err) {
-            console.error('Failed to read snapshots:', err);
-        }
-    }
-}
-
-export async function handleLimit(ctx: Context, input: {[key: string]: any}) {
-    const [, name, value] = input.args;
-    const meta = await utils.readJson(`data/snapshots/${name}/metadata.json`)
-
-    meta.limit = value * 1024 * 1024;
-
-    await utils.writeJson(`data/snapshots/${name}/metadata.json`, meta);
-
-    console.log(`'${name}' was limited.`)
-}
-
-export async function handleImage(ctx: Context, input: {[key: string]: any}) {
+export async function handleImage(ctx: Context, input: { [key: string]: any }): Promise<void> {
     const [, img_name] = input.args;
-    
-    const canvas = createCanvas((ctx.selection.width-1)*1000, (ctx.selection.height-1)*1000);
-    const __ctx = canvas.getContext('2d');
+
+    const tokens: any[] = [];
 
     const tiles: number[][] = await ctx.selection.getXY();
     const tlx0 = ctx.selection.data[0][0];
     const tly1 = ctx.selection.data[1][1];
 
+    const progress = ctx.createProgress({total: tiles.length, width: 40})
+
     for (let i = 0; i < tiles.length; i += ctx.CONCURRENCY) {
         const batch = tiles.slice(i, i + ctx.CONCURRENCY);
         await Promise.all(batch.map(async ([cx, cy]) => {
-            let img_buf = ctx.IMAGE_BUFFER_CACHE.get(`${cx}_${cy}`);
-            if(!img_buf) img_buf = await utils.downloadFileWithRetry(`https://backend.wplace.live/files/s0/tiles/${cx}/${cy}.png`);
-             
-            const img = await loadImage(img_buf);
-            if (img.width && img.height) {
-                __ctx.drawImage(img, (cx - tlx0) * 1000, (cy - tly1) * 1000);
+            progress.tick(1);
+
+            let img_buf = ctx.IMAGE_BUFFER_CACHE.get(utils.hash_xy(cx, cy));
+            if (!img_buf) img_buf = await utils.downloadFileWithRetry(`https://backend.wplace.live/files/s0/tiles/${cx}/${cy}.png`);
+
+            if (img_buf.length) {
+                tokens.push({ 
+                    input: img_buf,
+                    left: (cx - tlx0) * 1000, 
+                    top: (cy - tly1) * 1000 
+                });
             } else {
                 console.warn(`Tile ${cx},${cy} is empty`);
             }
@@ -288,37 +238,71 @@ export async function handleImage(ctx: Context, input: {[key: string]: any}) {
     }
 
     await fs.mkdir('data/images/', { recursive: true });
-
-    const buffer = canvas.toBuffer('image/png');
-    await fs.writeFile(`data/images/${img_name}.png`, buffer);
+    await sharp({
+        create: {
+            width: ctx.selection.width * 1000,
+            height: ctx.selection.height * 1000,
+            channels: 4,
+            background: { r: 0, g: 0, b: 0, alpha: 0 }
+        }
+    })
+        .composite(tokens)
+        .png()
+        .toFile(`data/images/${img_name}.png`);
 
     console.log(`Image '${img_name}' was uploaded to directory 'data/images/'.`);
 }
 
+async function handleImageBuffer(ctx: Context, name: string, date: number, area: Area): Promise<Buffer | null> {
+    const tokens: any[] = [];
+
+    const tiles: number[][] = await area.getXY();
+    const tlx0 = area.data[0][0];
+    const tly1 = area.data[1][1];
+
+    if(name) {
+        const snapshot: Snapshot | null = date ? SnapshotService.findSnapshot(name, date) : SnapshotService.findSnapshotLatest(name);
+        if(!snapshot) {
+            console.log("Snapshot not found");
+            return null;
+        }
+
+        for (let i = 0; i < tiles.length; i += ctx.CONCURRENCY) {
+            const batch = tiles.slice(i, i + ctx.CONCURRENCY);
+            await Promise.all(batch.map(async ([cx, cy]) => {
+                const buffer: Buffer | null = await snapshot.loadTileRawCache(cx, cy);
+                if (buffer) {
+                    tokens.push({
+                        input: buffer, 
+                        raw: {width: 1000, height: 1000, channels: 4},
+                        left: (cx - tlx0) * 1000, 
+                        top: (cy - tly1) * 1000});
+                } else {
+                    console.warn(`Tile ${cx},${cy} is empty`);
+                }
+            }));
+        }
+
+    }
+    return await sharp({
+        create: {
+            width:  area.width *1000,
+            height: area.height*1000,
+            channels: 4,
+            background: { r: 0, g: 0, b: 0, alpha: 0 }
+        }
+        })
+        .composite(tokens)
+        .toBuffer();
+}
+
 export async function handleGif(ctx: Context, input: {[key: string]: any}) {
-    const [, output_name, delay, from, to] = input.args;
+    const [, output_name, delay, from = 0, to = 0] = input.args;
     const width  = ctx.selection.width  * 1000;
     const height = ctx.selection.height * 1000;
-    const tlx0 = ctx.selection.data[0][0];
-    const tly1 = ctx.selection.data[1][1];
-
-    const from_date = utils.pathToDate(from);
-    const to_date   = utils.pathToDate(to);
-
-    const dates = await getSnapshotChanges(ctx.snapshot);
-    const filtered_dates = dates.filter((d) => d >= from_date && d <= to_date);
-
-    const gridXY = await ctx.selection.getXY();
-    const tileOffsets = gridXY.map(([cx, cy]) => {
-        return {
-            x: Math.round((cx - tlx0) * 1000),
-            y: Math.round((cy - tly1) * 1000),
-            name: `${cx}_${cy}.png`
-        };
-    });
-
-    const canvas = createCanvas(width, height);
-    const __ctx = canvas.getContext('2d');
+    
+    const dates = HistoryRepository.getDates(ctx.snapshot.id);
+    const filtered_dates = dates.filter(d => d.created_at >= Number(from) && d.created_at <= Number(to));
 
     const outPath = `data/gifs/${output_name}.gif`;
     const writeStream = fsc.createWriteStream(outPath);
@@ -331,73 +315,19 @@ export async function handleGif(ctx: Context, input: {[key: string]: any}) {
     encoder.setDelay(Number(delay));
     encoder.setQuality(10);
 
-    let prevFrameBuffer = null;
-
-    const useFrameDedup  = true;
-    const skipEmptyFrame = true;
-
+    const tiles = ctx.selection.width*ctx.selection.height;
+    const progress = ctx.createProgress({total: tiles*filtered_dates.length, width:40});
+    
     for(const date of filtered_dates) {
-        __ctx.fillStyle = "#ffffffff";
-        __ctx.fillRect(0, 0, width, height);
+        progress.tick(tiles);
 
-        const folderPath = `data/snapshots/${ctx.snapshot.name}/${utils.dateToPath(date)}/`
-        let success = true;
-        for(const [cx, cy] of gridXY) {
-            try {
-                const buffer = await fs.readFile(folderPath+`${cx}_${cy}.png`)
-                const img = await loadImage(buffer);
-                
-                __ctx.drawImage(img, (cx - tlx0) * 1000, (cy - tly1) * 1000);
-            } catch(e) {
-                success = false;
-                break;
-            }
-        }
+        const imageData = await handleImageBuffer(ctx, ctx.snapshot.name, date.created_at, ctx.selection);
+        if(!imageData) continue;
 
-        if(!success) continue;
-
-        const loadPromises = tileOffsets.map(async (t) => {
-            const p = folderPath + t.name;
-                try {
-                    const buf = await fs.readFile(p);
-                    const img = await loadImage(buf);
-                    return { img, x: t.x, y: t.y };
-                } catch (e) {
-                    return null;
-                }
-        });
-
-        const images = await Promise.all(loadPromises);
-        for (const it of images) {
-            if (!it) continue;
-            __ctx.drawImage(it.img, it.x, it.y);
-        }
-        const imageData = __ctx.getImageData(0, 0, width, height)
-
-        if (skipEmptyFrame) {
-            const buf = new Uint32Array(imageData.data.buffer);
-            let empty = true;
-
-            for (let i = 0; i < buf.length; i++) {
-                if (buf[i] !== 0) {
-                    empty = false;
-                    break;
-                }
-            }
-            if(empty) continue;
-        }
-
-        if (useFrameDedup) {
-            const buf = Buffer.from(imageData.data.buffer);
-
-            if (prevFrameBuffer && Buffer.compare(prevFrameBuffer, buf) === 0) {
-                continue;
-            }
-            prevFrameBuffer = buf;
-            encoder.addFrame(__ctx);
-        } else encoder.addFrame(__ctx);
+        encoder.addFrame(imageData);
     }
     encoder.finish();
+    ctx.snapshot.clearCache();
 
     await new Promise((res, rej) => {
         writeStream.on("close", res);
@@ -406,6 +336,64 @@ export async function handleGif(ctx: Context, input: {[key: string]: any}) {
 
     console.log("Gif was created.");
 }
+
+export async function handleImport(ctx: Context, input: {[key: string]: any}) {
+    const [ , name, indate = 0] = input.args;
+    if(name && indate) {
+        if(SnapshotService.findSnapshot(name, indate)) return;
+    } else {
+        if(SnapshotService.findSnapshotLatest(name)) return;
+    }
+
+    if(await utils.folderExists(`${SNAPSHOTS_DIR}/${name}/data`)) {
+        const dates_dirs = await fs.readdir(`${SNAPSHOTS_DIR}/${name}/data`);
+        const dates: number[] = dates_dirs.map(d => Number(d)).sort();
+
+        for(const date of dates) {
+            let snapshot: Snapshot | null = SnapshotService.findSnapshot(name, date);
+            if(!snapshot) {
+                snapshot = new Snapshot(name, date);
+                SnapshotService.createSnapshot(snapshot);
+
+                const tiles = await fs.readdir(`${snapshot.rootPath}/${date}`);
+                for(const tile_file of tiles) {
+                    const [xStr, yStr] = tile_file.split(/[_\.]/);
+                    const tile_key = utils.hash_xy(Number(xStr), Number(yStr));
+                    const tile: TileEntity = new TileEntity({
+                        snapshot_id: snapshot.id,
+                        hash: tile_key,
+                        baseline:   snapshot.created_at,
+                        created_at: snapshot.created_at,
+                        size: 0,
+                        changed: 0
+                    });
+
+                    if(path.extname(tile_file) !== '.png') {
+                        const prev_tile: TileEntity | null = TileRepository.get(
+                            snapshot.id, 
+                            snapshot.created_at,
+                            tile_key
+                        );
+
+                        if(prev_tile) {
+                            tile.baseline = prev_tile.baseline;
+                        } else {
+                            console.log(`Baseline of '${xStr}_${yStr}' not found. The Import may be corrupted.`)
+                            return;
+                        }
+                    }
+                    
+                    TileRepository.save(tile);
+                }
+            }
+        }
+
+        
+    } else {
+        console.log(`Import '${name}' not found.`)
+    }
+}
+
 
 export async function handleSchedule(ctx: Context, input: {[key: string]: any}) {
     const [, name, time] = input.args;

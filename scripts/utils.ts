@@ -3,17 +3,17 @@ import path from "path"
 
 // JSON //
 
-export async function folderExists(folderPath) {
+export async function folderExists(folderPath: string) {
   try {
     const stats = await fs.stat(folderPath);
     return stats.isDirectory();
-  } catch (err) {
+  } catch (err: any) {
     if (err.code === 'ENOENT') return false; 
     throw err; 
   }
 }
 
-export async function removeEmptyParents(dirPath, stopAt) {
+export async function removeEmptyParents(dirPath: string, stopAt: string) {
   let current = dirPath;
 
   while (true) {
@@ -35,7 +35,7 @@ export async function removeEmptyParents(dirPath, stopAt) {
   }
 }
 
-export async function readJson(filePath, options = { default: {}, createIfAbsent: false }) {
+export async function readJson(filePath: string, options = { default: {}, createIfAbsent: false }) {
   try {
     const data = await fs.readFile(filePath, "utf8");
     const json = JSON.parse(data);
@@ -49,7 +49,7 @@ export async function readJson(filePath, options = { default: {}, createIfAbsent
     }
 
     return json;
-  } catch (err) {
+  } catch (err: any) {
     if (err.code === "ENOENT" && options.createIfAbsent) {
       await fs.mkdir(path.dirname(filePath), { recursive: true });
       await fs.writeFile(filePath, JSON.stringify({}, null, 2), "utf8");
@@ -58,7 +58,7 @@ export async function readJson(filePath, options = { default: {}, createIfAbsent
   }
 }
 
-export async function writeJson(filePath, obj) {
+export async function writeJson(filePath: string, obj: Object) {
   try {
     const data = JSON.stringify(obj, null, 2);
     await fs.writeFile(filePath, data, 'utf8');
@@ -67,7 +67,7 @@ export async function writeJson(filePath, obj) {
   }
 }
 
-export async function downloadFileWithRetry(url) {
+export async function downloadFileWithRetry(url: string): Promise<Buffer> {
   try {
     const res = await fetch(url);
 
@@ -84,7 +84,7 @@ export async function downloadFileWithRetry(url) {
     }
 
     return Buffer.from(await res.arrayBuffer());
-  } catch (err) {
+  } catch (err: any) {
     console.error("Download error:", err.message);
     throw err;
   }
@@ -93,55 +93,28 @@ export async function downloadFileWithRetry(url) {
 
 // Dates //
 
-export function getLocalDateTime() {
-    const now = new Date();
-    const pad = (n) => n.toString().padStart(2, "0");
-    return `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} `
-         + `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+export function unixToFormatted(unixSeconds: number) {
+  const d = new Date(unixSeconds * 1000);
+  const pad = n => n.toString().padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+         `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-export function pathToDate(p) {
-  const [year, month, day, hour, minute] = p.trim().split(/\/+/);
-  return new Date(year, month - 1, day, hour, minute);
-}
-
-export function pathToFormatted(p) {
-  const parts = p.trim().split(/[\:_\-\s/]+/); // добавлен "_"
-
-  if (parts.length < 6) {
-    console.warn("Invalid format:", p);
-    return "0000-00-00 00:00:00";
-  }
-
-  const [year, month, day, hour, minute, seconds] = parts;
-
-  return `${year}-${month}-${day} ${hour}:${minute}:${seconds}`;
-}
-
-export function formattedToPath(p) {
-  const [year, month, day, hour, minute, seconds] = p.trim().split(/[\:-\s/]+/);
-  return `${year}_${month}_${day}_${hour}_${minute}_${seconds}`;
-}
-
-export function formattedToDate(p) {
-  const [month, day, year, hour, minute,] = p.trim().split(/[\:-\s/]+/);
-  return new Date(year, month - 1, day, hour, minute);
-}
-
-export function dateToPath(d) {
-  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}/${String(d.getHours()).padStart(2,'0')}/${String(d.getMinutes()).padStart(2,'0')}`
-}
-
-export function dateToFormatted(d) {
-  return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}-${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`
+export function formattedToUnix(formatted: string) {
+  const [datePart, timePart] = formatted.split(' ');
+  const [year, month, day] = datePart.split('-').map(Number);
+  const [hours, minutes, seconds] = timePart.split(':').map(Number);
+  
+  const d = new Date(year, month - 1, day, hours, minutes, seconds);
+  return Math.floor(d.getTime() / 1000);
 }
 
 // other //
 
 // x and y don't exceed 2048 due to world's restrictions. //
-export function hash_xy(x, y) {return (x << 11) | y;}
+export function hash_xy(x: number, y: number) {return (x << 11) | y;}
 
 // z <= 32 //
-export function hash_zxy(z, x, y) {return (z << 22) | (x << 11) | y}
+export function hash_zxy(z: number, x: number, y: number) {return (z << 22) | (x << 11) | y}
 
-export function sleep(ms) {return new Promise(resolve => setTimeout(resolve, ms));}
+export function sleep(ms: number) {return new Promise(resolve => setTimeout(resolve, ms));}
