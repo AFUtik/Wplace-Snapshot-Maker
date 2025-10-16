@@ -1,16 +1,22 @@
 import { LRUCache } from 'lru-cache';
 
+import fs from "fs/promises"
 import readline from "readline";
-import * as utils from './utils.js'
+import * as utils from './utils.ts'
+import { performance } from 'perf_hooks';
+
+import { SnapshotRepository, SnapshotEntity, TileRepository, TileEntity, HistoryRepository, HistoryItemEntity } from './sqlite.ts';
+
+import { readDPNG, DPNGFile} from './dpng.ts';
+import type { PNGBuffer } from './dpng.ts';
+
+import sharp from 'sharp';
 
 export const SNAPSHOTS_DIR = "data/snapshots";
 
 const DEFAULT_META: {[key: string]: any} = {
-    latest_date: "",
     area: [],
     area_type: 'rectangle',
-    limit: 0,
-    memory_cache: {}
 };
 
 export class Area {
@@ -69,12 +75,11 @@ export class Area {
         return {x, y};
     }
 
-    private pointInPolygon(point: [number, number], vs: number[][]): boolean {
-        const [x, y] = point;
+    private pointInPolygon(x: number, y: number): boolean {
         let inside = false;
-        for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
-            const xi = vs[i][0], yi = vs[i][1];
-            const xj = vs[j][0], yj = vs[j][1];
+        for (let i = 0, j = this.data.length - 1; i < this.data.length; j = i++) {
+            const xi = this.data[i][0], yi = this.data[i][1];
+            const xj = this.data[j][0], yj = this.data[j][1];
 
             const intersect = ((yi > y) !== (yj > y)) &&
                 (x < (xj - xi) * (y - yi) / (yj - yi + 0.0000001) + xi);
@@ -82,16 +87,38 @@ export class Area {
         }
         return inside;
     }
-
-    private rectIntersectsPolygon(x: number, y: number, poly: number[][]): boolean {
+    
+    private rectIntersectsPolygon(x: number, y: number): boolean {
         const corners: [number, number][] = [
             [x, y],
             [x+1, y],
             [x, y+1],
             [x+1, y+1]
         ];
-        return corners.some(c => this.pointInPolygon(c, poly));
+        return corners.some(c => this.pointInPolygon(c[0], c[1]));
     }
+    
+    contains(x: number, y: number): boolean {
+        if (this.empty()) return false;
+
+        if (this.type === "rectangle") {
+            const [x0, y0] = this.data[0];
+            const [x1, y1] = this.data[1];
+            const minX = Math.min(x0, x1);
+            const maxX = Math.max(x0, x1);
+            const minY = Math.min(y0, y1);
+            const maxY = Math.max(y0, y1);
+
+            return x >= minX && x <= maxX && y >= minY && y <= maxY;
+        }
+
+        if (this.type === "polygon") {
+            return this.pointInPolygon(x, y);
+        }
+
+        return false;
+    }
+
 
     async getXY(): Promise<number[][]> {
         let queue = [];
@@ -115,7 +142,7 @@ export class Area {
 
             for (let y = Math.floor(miny); y <= Math.ceil(maxy); y++) {
                 for (let x = Math.floor(minx); x <= Math.ceil(maxx); x++) {
-                    if (this.rectIntersectsPolygon(x, y, this.data)) {
+                    if (this.rectIntersectsPolygon(x, y)) {
                         queue.push([Math.floor(x), Math.floor(y)]);
                     }
                 }
@@ -127,78 +154,183 @@ export class Area {
 }
 
 export class Snapshot {
+    id: number = 0;
+    created_at: number;
+
     name: string;
-    date: string;
+    size: number = 0;
 
     fullPath: string;
     rootPath: string;
 
-    meta: any;
-    
     area: Area;
-    
-    constructor(name: string, date: string = "", area: Area = new Area([[0, 0], [0, 0]])) {
+    rgba_cache: LRUCache<number, Buffer> | null = null;
+
+    constructor(name: string, date: number = 0, area: Area = new Area([[0, 0], [0, 0]])) {
         this.name = name;
-        this.date = date;
+        if(date) {
+            this.created_at = date;
+        } else {
+            const now = new Date();
+            this.created_at = Math.floor(now.getTime() / 1000);
+        }
 
         this.area = area;
-        this.meta = DEFAULT_META;
 
-        this.fullPath = `${SNAPSHOTS_DIR}/${name}/${date}`
-        this.rootPath = `${SNAPSHOTS_DIR}/${name}`
+        this.rootPath = `${SNAPSHOTS_DIR}/${name}/data/`;
+        this.fullPath = `${this.rootPath}${this.created_at}`
     }
 
-    async setDateNow() {
-        const now = new Date();
-
-        this.date = `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()}/${String(now.getHours()).padStart(2, '0')}/${String(now.getMinutes()).padStart(2, '0')}`
-        this.fullPath = `data/snapshots/${this.name}/${this.date}`;
+    clearCache() {
+        this.rgba_cache?.clear();
     }
 
-    async setDatePath(date: string) {
-        this.date = date;
-        this.fullPath = `data/snapshots/${this.name}/${date}`;
+    async ensureDir() {
+        await fs.mkdir(this.fullPath, {recursive: true});
     }
 
-    async setDate(date: Date) {
-        this.date = `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}/${String(date.getHours()).padStart(2, '0')}/${String(date.getMinutes()).padStart(2, '0')}`
-        this.fullPath = `data/snapshots/${this.name}/${this.date}`;
+    async loadTile(x: number, y: number): Promise<Buffer | null> {
+        const tile: TileEntity | null = TileRepository.get(this.id, this.created_at, utils.hash_xy(x, y));
+
+        if(!tile) return null;
+
+        const path_to_png  = `${this.rootPath}/${tile.baseline}/${x}_${y}.png`;
+        if(tile.baseline != tile.created_at) {
+            const path_to_dpng = `${this.rootPath}/${tile.created_at}/${x}_${y}.dpng`;
+            
+            const dpng: DPNGFile  = await readDPNG(path_to_dpng);
+            const org:  PNGBuffer = await fs.readFile(path_to_png);
+            
+            return await dpng.apply(org);
+        } else {
+            return await fs.readFile(path_to_png)
+        }
     }
 
-    async readMeta() {
-        return await utils.readJson(`${SNAPSHOTS_DIR}/${this.name}/metadata.json`, {default: DEFAULT_META, createIfAbsent: true})
+    // Returns raw data and creates cache that stores rgba data. //
+    async loadTileRawCache(x: number, y: number): Promise<Buffer | null> {
+        if (!this.rgba_cache) {
+            this.rgba_cache = new LRUCache({
+                maxSize: 256 * (1024 * 1024), // 256 megabytes
+                sizeCalculation: (buf32: Buffer) => buf32.byteLength
+            });
+        }
+
+        const tile: TileEntity | null = TileRepository.get(this.id, this.created_at, utils.hash_xy(x, y));
+        if (!tile) return null;
+
+        const path_to_png = `${this.rootPath}/${tile.baseline}/${x}_${y}.png`;
+        const tile_key = utils.hash_xy(x, y);
+
+        let org: Buffer | undefined = this.rgba_cache.get(tile_key);
+        if (!org) {
+            org = await sharp(path_to_png)
+                .raw()
+                .ensureAlpha()
+                .toBuffer();
+            this.rgba_cache.set(tile_key, org);
+        }
+        if (tile.baseline != tile.created_at) {
+            const dpng: DPNGFile = await readDPNG(`${this.rootPath}/${tile.created_at}/${x}_${y}.dpng`);
+            return await dpng.applyRaw(org);
+        }
+        return org;
     }
 
-    async fetchMeta() { 
-        if(!await utils.folderExists(this.rootPath)) return;
+    // Reads area info from metadata.json //
+    async readArea(): Promise<Area> { 
+        if(!await utils.folderExists(this.rootPath)) return new Area([]);
 
-        const meta = await this.readMeta();
+        const meta = await utils.readJson(`${SNAPSHOTS_DIR}/${this.name}/metadata.json`, {default: DEFAULT_META, createIfAbsent: true});
 
-        await this.setDatePath(meta.latest_date);
-        this.area = new Area(meta.area, meta.area_type)
+        return new Area(meta.area, meta.area_type)
     }
 
-    async writeMeta(meta: any) {
-        await utils.writeJson(`${SNAPSHOTS_DIR}/${this.name}/metadata.json`, meta)
+    async writeArea(wr_area: Area): Promise<void> {
+        await utils.writeJson(`${SNAPSHOTS_DIR}/${this.name}/metadata.json`, {area: wr_area.data, area_type: wr_area.type});
     }
 
+    // Checks a snapshot on disk //
     async exists(): Promise<boolean> {
-        if(!await utils.folderExists(this.fullPath)) return false;
+        if(!await utils.folderExists(this.rootPath)) return false;
         return true;
     }
 }
+
+export class SnapshotService {
+    static findSnapshotLatest(name: string) {
+        const entity = SnapshotRepository.getByName(name);
+        if(!entity) return null;
+
+        const historyItem = HistoryRepository.getLatest(entity.id);
+        if(!historyItem) return null;
+
+        const snapshot = new Snapshot(name, historyItem.created_at);
+        snapshot.id = entity.id;
+
+        return snapshot;
+    }
+
+    static findSnapshot(name: string, date: number) {
+        const entity = SnapshotRepository.getByName(name);
+        if(!entity) return null;
+
+        const historyItem = HistoryRepository.getByDate(entity.id, date);
+        if(!historyItem) return null;
+        
+        const snapshot = new Snapshot(name, historyItem.created_at);
+        snapshot.id = entity.id;
+
+        return snapshot;
+    }
+
+    static createSnapshot(snapshot: Snapshot) {
+        let entity: SnapshotEntity | null = SnapshotRepository.getByName(snapshot.name);
+        if(!entity) {
+            const newid: number = SnapshotRepository.save(snapshot.name);
+            entity = new SnapshotEntity({id: newid});
+        }
+        
+        const historyItem = new HistoryItemEntity();
+        historyItem.snapshot_id = entity.id;
+        historyItem.created_at = snapshot.created_at;
+        historyItem.size = snapshot.size;
+
+        snapshot.id = entity.id;
+        HistoryRepository.save(historyItem);
+    }
+
+    static deleteSnapshot(snapshot: Snapshot) {
+        let entity: SnapshotEntity | null = SnapshotRepository.getByName(snapshot.name);
+        if(!entity) return;
+
+        if(snapshot.created_at) {
+            console.log(snapshot.created_at);
+
+            const historyItem = HistoryRepository.getByDate(entity.id, snapshot.created_at);
+            if(!historyItem) return null;
+
+            HistoryRepository.delete(entity.id, snapshot.created_at);
+        } else {
+            SnapshotRepository.delete(entity.id);
+        }
+    }
+};
 
 export class Context {
     rl: readline.Interface;
     intervals: {[key: string]: NodeJS.Timeout};
 
     CONCURRENCY: number;
-    TILE_CACHE:         LRUCache<string, Buffer>;
-    IMAGE_BUFFER_CACHE: LRUCache<string, Buffer>;
+    TILE_CACHE:         LRUCache<number, PNGBuffer>;
+    IMAGE_BUFFER_CACHE: LRUCache<number, PNGBuffer>;
     CACHE_CONTROL: boolean;
     CACHE_CONTROL_LIFETIME: number;
     DOWNLOAD_COOLDOWN:      number;
     DOWNLOAD_LIMIT:         number;
+
+    BASELINE_THRESHOLD_MEMORY: number;
+    USE_VERSION_SYSTEM: boolean;
 
     snapshot: Snapshot;
     
@@ -212,11 +344,21 @@ export class Context {
         });
 
         this.intervals = {};
-
         this.CONCURRENCY = settings.concurrency;
 
-        this.TILE_CACHE = new LRUCache({ max: settings.tile_cache, });
-        this.IMAGE_BUFFER_CACHE = new LRUCache({ max: settings.chunk_image_cache });
+        this.TILE_CACHE = new LRUCache(
+            { 
+                maxSize: settings.tile_cache_memory, 
+                sizeCalculation: (image: Buffer) => image.byteLength
+            }
+        );
+
+        this.IMAGE_BUFFER_CACHE = new LRUCache(
+             { 
+                maxSize: settings.image_cache_memory, 
+                sizeCalculation: (image: Buffer) => image.byteLength
+            }
+        );
 
         this.CACHE_CONTROL = settings.cache_control;
         this.CACHE_CONTROL_LIFETIME = settings.cache_control_lifetime;
@@ -225,21 +367,103 @@ export class Context {
         this.DOWNLOAD_LIMIT = settings.download_limit;
 
         this.selection = new Area([]);
-        this.snapshot = new Snapshot("", "", new Area([]));
-        
+        this.snapshot = new Snapshot("", 0, new Area([]));
+
+        this.BASELINE_THRESHOLD_MEMORY = settings.baseline_threshold_memory;
+        this.USE_VERSION_SYSTEM = settings.use_version_system;
     }
 
     ask(query: string): Promise<string> {
         return new Promise(resolve => this.rl.question(query, resolve));
     }
 
-    clearCache() {
-        this.TILE_CACHE.clear();
-        this.IMAGE_BUFFER_CACHE.clear();
+    createProgress({ total = 100, width = 30, format = 'bar' } = {}) {
+        let completed = 0;
+        let start = performance.now();
+        let lastRender = 0;
+        let spinnerIdx = 0;
+        const spinner = ['|', '/', '-', '\\'];
+        const minInterval = 80; // ms between renders
+
+        function clearLine() {
+            readline.clearLine(process.stdout, 0);
+            readline.cursorTo(process.stdout, 0);
+        }
+
+        function formatTime(ms: number) {
+            if (!isFinite(ms) || ms <= 0) return '--:--';
+            const s = Math.round(ms / 1000);
+            const hh = Math.floor(s / 3600);
+            const mm = Math.floor((s % 3600) / 60);
+            const ss = s % 60;
+            return (hh ? String(hh).padStart(2,'0') + ':' : '') + String(mm).padStart(2,'0') + ':' + String(ss).padStart(2,'0');
+        }
+
+        function render(force = false) {
+            const now = performance.now();
+            if (!force && now - lastRender < minInterval) return;
+            lastRender = now;
+
+            const elapsed = now - start;
+            const pct = total > 0 ? Math.min(1, completed / total) : 0;
+            const percents = Math.round(pct * 100);
+            const filled = Math.round(pct * width);
+            const bar = '[' + '#'.repeat(filled) + '-'.repeat(width - filled) + ']';
+            const spinnerChar = spinner[spinnerIdx % spinner.length];
+            spinnerIdx++;
+
+            const avgPerItem = completed ? elapsed / completed : 0;
+            const remaining = total > 0 ? avgPerItem * (total - completed) : 0;
+
+            const left = `${completed}/${total}`;
+            const timeInfo = `elapsed ${formatTime(elapsed)} ETA ${formatTime(remaining)}`;
+
+            clearLine();
+            if (format === 'bar') {
+            process.stdout.write(`${spinnerChar} ${bar} ${percents}% ${left} ${timeInfo}`);
+            } else {
+            process.stdout.write(`${spinnerChar} ${percents}% ${left} ${timeInfo}`);
+            }
+        }
+
+        function tick(n = 1) {
+            completed += n;
+            if (completed > total) completed = total;
+            render();
+            if (completed === total) done();
+        }
+
+        function setTotal(n: number) {
+            total = n;
+            render(true);
+        }
+
+        function done() {
+            render(true);
+            process.stdout.write('\n');
+        }
+
+        // optional periodic render to keep spinner moving even when ticks are rare
+        const interval = setInterval(() => {
+            if (completed < total) render();
+        }, 200);
+
+        return {
+            tick,
+            setTotal,
+            done: () => {
+            clearInterval(interval);
+            done();
+            },
+            _debug: () => ({ total, completed })
+        };
     }
 
     async changeSnapshot(snapshot: Snapshot) {
-        this.clearCache();
+        this.TILE_CACHE.clear();
+        this.IMAGE_BUFFER_CACHE.clear();
+
         this.snapshot = snapshot;
+        this.snapshot.area = await this.snapshot.readArea();
     }
 }

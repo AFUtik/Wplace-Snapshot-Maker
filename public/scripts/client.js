@@ -104,7 +104,7 @@ async function initMap() {
                     .catch(err => console.error("Error:", err));
 
                 localStorage.setItem('selection', JSON.stringify({
-                    points: [[x0, y0], [x1, y1]],
+                    points: [[x0, y0], [Math.floor(Math.max(px_coords0.x, px_coords1.x)), Math.floor(Math.max(px_coords0.y, px_coords1.y))]],
                     type: 'rectangle'
                 }));
             }
@@ -308,7 +308,7 @@ dateFrom_sel.addEventListener("mousedown", async () => {
         });
 
         const result = await response.json();
-        fillOptions(dateFrom_sel, result.dates);
+        fillOptions(dateFrom_sel, result.items);
     } else {
         await updateList(dateFrom_sel, "dates");
     }
@@ -327,7 +327,7 @@ dateTo_sel.addEventListener("mousedown", async () => {
         });
 
         const result = await response.json();
-        fillOptions(dateTo_sel, result.dates);
+        fillOptions(dateTo_sel, result.items);
     } else {
         await updateList(dateTo_sel, "dates");
     }
